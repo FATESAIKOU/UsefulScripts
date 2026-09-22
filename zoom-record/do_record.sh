@@ -114,7 +114,7 @@ dismiss_nag() {
     local png="$RDIR/nag.png" xy
     rm -f "$png"
     DISPLAY=:99 scrot "$png" 2>/dev/null || return 0
-    xy="$(click_word "$png" "Please" 595 10)"
+    xy="$(click_word "$png" "Please" 624 -10)"
     if [[ -n "$xy" ]]; then
         log "dismissing nag banner at $xy"
         DISPLAY=:99 xdotool mousemove $xy click 1 2>/dev/null
@@ -315,10 +315,18 @@ stop_ffmpeg() {
 
 if [[ "$TEST_SECS" -gt 0 ]]; then
     log "test mode: recording ${TEST_SECS}s ..."
-    sleep "$TEST_SECS"
+    if [[ "$TEST_SECS" -gt 12 ]]; then
+        sleep 10
+        dismiss_nag
+        sleep $((TEST_SECS - 10))
+    else
+        sleep "$TEST_SECS"
+    fi
     stop_ffmpeg
     leave_meeting
 else
+    sleep 12
+    dismiss_nag
     START=$(date +%s)
     MISS=0; QUIET=0; OCR_TICK=0
     while true; do
