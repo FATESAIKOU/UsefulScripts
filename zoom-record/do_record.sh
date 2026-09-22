@@ -1,31 +1,57 @@
 #!/usr/bin/env bash
-# do_record.sh — Mac controller: provision a (possibly fresh) mlp worker,
-# join a Zoom meeting headlessly (Chrome web client under Xvfb), record
-# screen+audio with ffmpeg until the meeting ends, fetch the mp4 back.
+# do_record.sh — controller: provision a (possibly fresh) Ubuntu 24.04 box
+# over plain SSH, join a Zoom meeting headlessly (Chrome web client under
+# Xvfb), record screen+audio with ffmpeg until the meeting ends, fetch mp4.
+#
+# Deliberately NOT tied to any cluster architecture (no mlp): the only
+# requirement on the far end is key-auth SSH + passwordless sudo.
+# Run it from anywhere (Mac, Gateway, fh-l) against anywhere.
 #
 # usage:
-#   ~/testSH/do_record.sh <host> <zoomid> <zoompw> <outputmp4>
-#   e.g. ~/testSH/do_record.sh worker-2300 72733198447 CNXi70 /tmp/meet.mp4
+#   do_record.sh <target> <zoomid> <zoompw> <outputmp4>
+#   <target> : [user@]host[:port]  (plain ssh names work too via ~/.ssh/config)
+#   e.g. do_record.sh worker-2302 72733198447 CNXi70 /tmp/meet.mp4
+#   e.g. SSH_OPTS="-F ~/.mylinuxpool/ssh_config" do_record.sh worker-2302 ...
+#   e.g. do_record.sh worker@127.0.0.1:2302 ...          (from the Gateway)
+#   e.g. SSH_OPTS="-i ~/.ssh/key" do_record.sh ubuntu@1.2.3.4 ...  (any cloud VM)
 #
-# <host> must be ssh-able (mlp ssh-config --write first).
 # env overrides:
-#   REC_NAME           display name in meeting (default: rec-<host>)
+#   SSH_OPTS           extra flags for ssh/scp, e.g. "-F cfg -i key -J jump"
+#                      (no spaces inside values; key-auth required)
+#   REC_NAME           display name in meeting (default: rec-<target>)
 #   TEST_SECS          >0: record N sec after admit then leave (default 0 = till meeting ends)
 #   ADMIT_TIMEOUT_SEC  how long to wait in waiting room (default 1200)
 #   MAX_REC_SEC        safety cap on recording length (default 21600 = 6h)
-#   SSH_CFG            ssh config file (default ~/.mylinuxpool/ssh_config)
+#   RES_W / RES_H      virtual display size (default 1920 / 1080)
 set -uo pipefail
 
 usage() {
-    echo "usage: $0 <host> <zoomid> <zoompw> <outputmp4>" >&2
-    echo "env: REC_NAME TEST_SECS ADMIT_TIMEOUT_SEC MAX_REC_SEC SSH_CFG" >&2
+    echo "usage: $0 <target> <zoomid> <zoompw> <outputmp4>" >&2
+    echo "  <target>: [user@]host[:port]; env: SSH_OPTS REC_NAME TEST_SECS ADMIT_TIMEOUT_SEC MAX_REC_SEC RES_W RES_H" >&2
 }
 
 [[ $# -eq 4 ]] || { usage; exit 2; }
-HOST="$1"; ZID="$2"; ZPW="$3"; OUT="$4"
+TARGET="$1"; ZID="$2"; ZPW="$3"; OUT="$4"
 
-SSH_CFG="${SSH_CFG:-$HOME/.mylinuxpool/ssh_config}"
-SAFEHOST="$(printf '%s' "$HOST" | tr -c '[:alnum:]' '-' | cut -c1-20)"
+# split [user@]host[:port] (IPv6 not supported — use ssh-config names for those)
+if [[ "$TARGET" == *@* ]]; then SSH_USER="${TARGET%%@*}"; REST="${TARGET#*@}"
+else SSH_USER=""; REST="$TARGET"; fi
+if [[ "$REST" == *:* ]]; then SSH_HOST="${REST%%:*}"; SSH_PORT="${REST##*:}"
+else SSH_HOST="$REST"; SSH_PORT=""; fi
+[[ -n "$SSH_HOST" ]] || { usage; exit 2; }
+DEST="${SSH_USER:+$SSH_USER@}$SSH_HOST"
+
+SSH=(ssh)
+SCP=(scp)
+if [[ -n "$SSH_PORT" ]]; then SSH+=(-p "$SSH_PORT"); SCP+=(-P "$SSH_PORT"); fi
+if [[ -n "${SSH_OPTS:-}" ]]; then
+    # shellcheck disable=SC2206
+    EXTRA=($SSH_OPTS)
+    SSH+=("${EXTRA[@]}"); SCP+=("${EXTRA[@]}")
+fi
+SSH_OPTS_DISPLAY="${SSH[*]}"
+
+SAFEHOST="$(printf '%s' "$TARGET" | tr -c '[:alnum:]' '-' | cut -c1-20)"
 REC_NAME="${REC_NAME:-rec-$SAFEHOST}"
 TEST_SECS="${TEST_SECS:-0}"
 ADMIT_TIMEOUT_SEC="${ADMIT_TIMEOUT_SEC:-1200}"
@@ -33,7 +59,6 @@ MAX_REC_SEC="${MAX_REC_SEC:-21600}"
 RES_W="${RES_W:-1920}"
 RES_H="${RES_H:-1080}"
 
-[[ -f "$SSH_CFG" ]] || { echo "do_record: ssh config not found: $SSH_CFG (run: mlp ssh-config --write)" >&2; exit 2; }
 command -v ssh >/dev/null || { echo "do_record: ssh not found" >&2; exit 2; }
 command -v scp >/dev/null || { echo "do_record: scp not found" >&2; exit 2; }
 
@@ -42,13 +67,12 @@ ZID_B64="$(B64 "$ZID")"
 ZPW_B64="$(B64 "$ZPW")"
 ZNAME_B64="$(B64 "$REC_NAME")"
 
-echo "do_record: checking ssh to $HOST ..." >&2
-ssh -F "$SSH_CFG" -o BatchMode=yes -o ConnectTimeout=15 "$HOST" "mkdir -p /tmp/mlprec && echo ok" 2>&1 | tail -n 2
-# shellcheck disable=SC2181
+echo "do_record: checking ssh to $DEST via [${SSH_OPTS_DISPLAY}] ..." >&2
+"${SSH[@]}" -o BatchMode=yes -o ConnectTimeout=15 "$DEST" "mkdir -p /tmp/mlprec && echo ok" 2>&1 | tail -n 2
 # (connectivity check above is informational; the upload below will fail loudly if ssh is broken)
 
-echo "do_record: uploading recorder payload to $HOST ..." >&2
-ssh -F "$SSH_CFG" -o BatchMode=yes -o ConnectTimeout=15 "$HOST" 'cat > /tmp/mlprec/run.sh' <<'REMOTE_EOF'
+echo "do_record: uploading recorder payload to $DEST ..." >&2
+"${SSH[@]}" -o BatchMode=yes -o ConnectTimeout=15 "$DEST" 'cat > /tmp/mlprec/run.sh' <<'REMOTE_EOF'
 #!/usr/bin/env bash
 # run.sh (remote payload) — env in: ZID_B64 ZPW_B64 ZNAME_B64 TEST_SECS ADMIT_TIMEOUT_SEC MAX_REC_SEC
 set -u
@@ -176,8 +200,9 @@ fi
 log "provision ok: $(google-chrome --version 2>/dev/null), $(ffmpeg -hide_banner -version 2>/dev/null | head -n1)"
 
 # ---- 2. virtual display + dummy audio ----
-CUR="$(DISPLAY=:99 xdotool getdisplaygeometry 2>/dev/null || echo none)"
-if [[ "$CUR" != "${RES_W} x ${RES_H}" ]]; then
+CUR="$(DISPLAY=:99 xdotool getdisplaygeometry 2>/dev/null | awk '{print $1"x"$2}')"
+[[ -z "$CUR" || "$CUR" == "x" ]] && CUR="none"
+if [[ "$CUR" != "${RES_W}x${RES_H}" ]]; then
     log "display is '$CUR', want ${RES_W}x${RES_H} — (re)starting Xvfb ..."
     pkill -x Xvfb 2>/dev/null; sleep 2
     rm -f /tmp/.X11-unix/X99
@@ -374,9 +399,9 @@ log "DONE $OUTMP4 ($(du -h "$OUTMP4" | cut -f1))"
 REMOTE_EOF
 echo "do_record: payload uploaded" >&2
 
-echo "do_record: launching remote recorder on $HOST (name=$REC_NAME, detached) ..." >&2
+echo "do_record: launching remote recorder on $DEST (name=$REC_NAME, detached) ..." >&2
 # shellcheck disable=SC2029
-ssh -F "$SSH_CFG" -o BatchMode=yes -o ConnectTimeout=15 "$HOST" \
+"${SSH[@]}" -o BatchMode=yes -o ConnectTimeout=15 "$DEST" \
     "rm -f /tmp/mlprec/run.out; ZID_B64='$ZID_B64' ZPW_B64='$ZPW_B64' ZNAME_B64='$ZNAME_B64' TEST_SECS='$TEST_SECS' ADMIT_TIMEOUT_SEC='$ADMIT_TIMEOUT_SEC' MAX_REC_SEC='$MAX_REC_SEC' RES_W='$RES_W' RES_H='$RES_H' setsid bash /tmp/mlprec/run.sh </dev/null >>/tmp/mlprec/run.out 2>&1 & echo LAUNCHED" \
     || { echo "do_record: remote launch failed" >&2; exit 1; }
 
@@ -387,7 +412,7 @@ LAST=0; ELAPSED=0; RC=1
 while [[ "$ELAPSED" -lt "$WAIT_BUDGET" ]]; do
     sleep 15; ELAPSED=$((ELAPSED + 15))
     FROM=$((LAST + 1))
-    BATCH="$(ssh -F "$SSH_CFG" -o BatchMode=yes -o ConnectTimeout=15 "$HOST" \
+    BATCH="$("${SSH[@]}" -o BatchMode=yes -o ConnectTimeout=15 "$DEST" \
         "TOTAL=\$(wc -l < /tmp/mlprec/run.out 2>/dev/null || echo 0); echo LINES:\$TOTAL; sed -n '${FROM},\$p' /tmp/mlprec/run.out 2>/dev/null; if grep -qE 'DONE /tmp|FATAL: ' /tmp/mlprec/run.out 2>/dev/null; then echo STATUS:FINISHED; elif pgrep -f '[r]un.sh' >/dev/null 2>&1; then echo STATUS:RUNNING; else echo STATUS:GONE; fi" \
         2>/dev/null)" || { echo "do_record: poll ssh failed, retrying ..." >&2; continue; }
     NL="$(printf '%s' "$BATCH" | sed -n 's/^LINES://p' | head -n1)"
@@ -395,21 +420,21 @@ while [[ "$ELAPSED" -lt "$WAIT_BUDGET" ]]; do
     printf '%s\n' "$BATCH" | sed -e '1d' -e '/^STATUS:/d' | sed '/^$/d'
     ST="$(printf '%s' "$BATCH" | sed -n 's/^STATUS://p' | head -n1)"
     if [[ "$ST" == "FINISHED" ]]; then
-        if ssh -F "$SSH_CFG" -o BatchMode=yes -o ConnectTimeout=15 "$HOST" "grep -q 'FATAL: ' /tmp/mlprec/run.out" 2>/dev/null; then
+        if "${SSH[@]}" -o BatchMode=yes -o ConnectTimeout=15 "$DEST" "grep -q 'FATAL: ' /tmp/mlprec/run.out" 2>/dev/null; then
             echo "do_record: remote recorder reported FAILURE" >&2; RC=1
         else
             RC=0
         fi
         break
     elif [[ "$ST" == "GONE" ]]; then
-        echo "do_record: remote recorder vanished without DONE (see /tmp/mlprec/run.out on $HOST)" >&2; RC=1; break
+        echo "do_record: remote recorder vanished without DONE (see /tmp/mlprec/run.out on $DEST)" >&2; RC=1; break
     fi
 done
-[[ "$ELAPSED" -lt "$WAIT_BUDGET" ]] || { echo "do_record: poll budget exhausted; remote may still run (check /tmp/mlprec/run.out on $HOST)" >&2; RC=1; }
+[[ "$ELAPSED" -lt "$WAIT_BUDGET" ]] || { echo "do_record: poll budget exhausted; remote may still run (check /tmp/mlprec/run.out on $DEST)" >&2; RC=1; }
 [[ "$RC" -eq 0 ]] || exit 1
 
 echo "do_record: fetching mp4 -> $OUT ..." >&2
 mkdir -p "$(dirname "$OUT")"
-scp -F "$SSH_CFG" -o BatchMode=yes "$HOST:/tmp/mlprec/out.mp4" "$OUT" || { echo "do_record: scp back failed" >&2; exit 1; }
+"${SCP[@]}" -o BatchMode=yes "$DEST:/tmp/mlprec/out.mp4" "$OUT" || { echo "do_record: scp back failed" >&2; exit 1; }
 ls -la "$OUT"
 echo "do_record: done: $OUT" >&2

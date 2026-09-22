@@ -1,18 +1,22 @@
 # zoom-record
 
-Mac 下一條指令，在遠端 Linux worker（mlp default image 即可，全新機器也行）
-上自動開 Chrome（Xvfb 虛擬螢幕）加入 Zoom 會議並錄影；主持人散會（或被移除）
-時自動停止，mp4 取回本機。
+一條指令，在遠端 Ubuntu 機器（全新安裝也行）上自動開 Chrome（Xvfb 虛擬螢幕）
+加入 Zoom 會議並錄影；主持人散會（或被移除）時自動停止，mp4 取回本機。
+走純 SSH，不綁任何叢集架構；在哪跑、對哪跑都行（Mac、Gateway、fh-l…）。
 
 ## 用法
 
 ```bash
-~/testSH/do_record.sh <host> <zoomid> <zoompw> <outputmp4>
+do_record.sh <target> <zoomid> <zoompw> <outputmp4>
+# <target> : [user@]host[:port]（~/.ssh/config 的名字也行）
 # e.g.
-~/testSH/do_record.sh worker-2302 75725811260 1PZ3sF /tmp/meet.mp4
+do_record.sh worker-2302 75725811260 1PZ3sF /tmp/meet.mp4
+SSH_OPTS="-F ~/.mylinuxpool/ssh_config" do_record.sh worker-2302 ...   # mlp
+do_record.sh worker@127.0.0.1:2302 ...                                 # 從 Gateway 直連
+SSH_OPTS="-i ~/.ssh/key" do_record.sh ubuntu@1.2.3.4 ...               # 任意雲主機
 ```
 
-- `<host>`：`mlp ssh-config --write` 後能直接 `ssh` 的名字。
+- 遠端需求：Ubuntu 24.04＋key 登入＋passwordless sudo（mlp default image 符合）。
 - bot 以匿名顯示名稱入會（預設 `rec-<host>`，`REC_NAME` 可改），
   不開相機（黑畫面）不開麥，低調旁錄。等候室需主持人放行。
   「Please enable access…」提示條會自動關掉（入會後＋每分鐘巡檢）。
@@ -27,6 +31,7 @@ Mac 下一條指令，在遠端 Linux worker（mlp default image 即可，全新
 | `ADMIT_TIMEOUT_SEC` | `1200` | 等候室等待上限 |
 | `MAX_REC_SEC` | `21600` | 錄影安全上限（6h） |
 | `RES_W` / `RES_H` | `1920` / `1080` | 虛擬螢幕解析度（錄影裁掉上方 140px 瀏覽器框） |
+| `SSH_OPTS` | 空 | 透傳給 ssh/scp 的參數，如 `"-F cfg -i key -J jump"`（值內勿含空白；需 key 登入） |
 | `SSH_CFG` | `~/.mylinuxpool/ssh_config` | ssh 設定檔 |
 
 ## 需求
