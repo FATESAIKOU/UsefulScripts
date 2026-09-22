@@ -93,7 +93,7 @@ try:
     out = subprocess.run(['tesseract', png, 'stdout', 'tsv'],
                          capture_output=True, text=True, timeout=25).stdout
 except Exception:
-    return
+    sys.exit(1)
 for line in out.splitlines()[1:]:
     p = line.split('\t')
     if len(p) < 12 or p[0] != '5':
