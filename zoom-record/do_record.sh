@@ -94,6 +94,8 @@ dismiss_nag() {
 page_state() {
     # screenshot + OCR the meeting tab -> WAITING | PREJOIN | INMEETING | ENDED | UNKNOWN
     local png="$RDIR/state.png" txt tl now mt
+    tl="$(wintitle)"
+    case "$tl" in *"Error - Zoom"*) echo INVALID; return ;; esac
     now=$(date +%s)
     rm -f "$png"
     DISPLAY=:99 scrot "$png" 2>/dev/null || { echo UNKNOWN; return; }
@@ -166,11 +168,17 @@ DISPLAY=:99 xdotool windowfocus "$CHROME_WIN"
 sleep 8
 DISPLAY=:99 xdotool key Escape  # dismiss notification-permission popup if any
 sleep 2
-# cookie banner (best effort; only on some loads) then device-permission
-# modals ("Continue without microphone and camera" x2 — OCR-gated).
+# cookie banner (OCR-gated; covers the form on fresh profiles) then
+# device-permission modals ("Continue without microphone and camera" — OCR-gated).
 # No fake devices on purpose: bot stays camera-off (black tile) + muted.
-DISPLAY=:99 xdotool mousemove 1053 397 click 1 2>/dev/null
-sleep 2
+for i in 1 2; do
+    rm -f "$RDIR/ck.png"
+    DISPLAY=:99 scrot "$RDIR/ck.png" 2>/dev/null || break
+    tesseract "$RDIR/ck.png" stdout 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -q "accept cookies" || break
+    log "accepting cookies ($i)"
+    DISPLAY=:99 xdotool mousemove 1010 450 click 1
+    sleep 3
+done
 for i in 1 2 3; do
     rm -f "$RDIR/m.png"
     DISPLAY=:99 scrot "$RDIR/m.png" 2>/dev/null || break
