@@ -248,7 +248,39 @@ if DISPLAY=:99 xdotool search --onlyvisible --class google-chrome 2>/dev/null | 
     pkill -9 -x chrome 2>/dev/null; sleep 3
 fi
 rm -rf "$RDIR/chrome-prof"; mkdir -p "$RDIR/chrome-prof"
-setsid bash -c 'DISPLAY=:99 google-chrome --no-sandbox --disable-dev-shm-usage --no-first-run --no-default-browser-check --use-angle=swiftshader --enable-unsafe-swiftshader --autoplay-policy=no-user-gesture-required --window-size=${RES_W},${RES_H} --window-position=0,0 --user-data-dir="$0/chrome-prof" "https://app.zoom.us/wc/$1/join"' "$RDIR" "$ZID" </dev/null >"$RDIR/chrome.log" 2>&1 &
+# toast-killer extension: hides nag/AI/accel toasts by TEXT (position-proof),
+# re-sweeping every 2s so re-rendered toasts die too. See zoom-record README.
+mkdir -p "$RDIR/toastext"
+cat > "$RDIR/toastext/manifest.json" <<'EXT_EOF'
+{"manifest_version":3,"name":"mlp-toastkiller","version":"1.0",
+ "content_scripts":[{"matches":["https://app.zoom.us/*"],"js":["content.js"],
+ "run_at":"document_idle","all_frames":true}]}
+EXT_EOF
+cat > "$RDIR/toastext/content.js" <<'EXT_EOF'
+const MLP_PHRASES = ["please enable access", "a new home for zoom ai",
+  "better meeting experience", "graphics/hardware acceleration"];
+function mlpSweep() {
+  try {
+    const els = document.querySelectorAll('body *');
+    for (const el of els) {
+      if (el.children.length) continue;
+      const t = (el.textContent || '').toLowerCase();
+      if (!t || !MLP_PHRASES.some(p => t.includes(p))) continue;
+      let n = el;
+      for (let i = 0; i < 4 && n && n !== document.body; i++) {
+        n = n.parentElement;
+        if (n && n.offsetWidth > 0 && n.offsetWidth < 1500) {
+          n.style.setProperty('display', 'none', 'important');
+          break;
+        }
+      }
+    }
+  } catch (e) {}
+}
+setInterval(mlpSweep, 2000);
+mlpSweep();
+EXT_EOF
+setsid bash -c 'DISPLAY=:99 google-chrome --no-sandbox --disable-dev-shm-usage --no-first-run --no-default-browser-check --use-angle=swiftshader --enable-unsafe-swiftshader --autoplay-policy=no-user-gesture-required --window-size=${RES_W},${RES_H} --window-position=0,0 --load-extension="$0/toastext" --user-data-dir="$0/chrome-prof" "https://app.zoom.us/wc/$1/join"' "$RDIR" "$ZID" </dev/null >"$RDIR/chrome.log" 2>&1 &
 CHROME_WIN=""
 for i in $(seq 1 30); do
     CHROME_WIN="$(DISPLAY=:99 xdotool search --onlyvisible --class google-chrome 2>/dev/null | head -n1)"

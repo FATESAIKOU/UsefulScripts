@@ -41,6 +41,9 @@ SSH_OPTS="-i ~/.ssh/key" do_record.sh ubuntu@1.2.3.4 ...               # 任意�
   套件（xvfb、ffmpeg、pulseaudio、xdotool、tesseract、google-chrome）
   由 script 自己裝，不用預裝。
 - 入會狀態用截圖＋OCR 判斷（等候室／入會中／已結束／無效連結）。
+- 會議中的提示 toast（權限要求、AI 介紹、硬加速）由 Chrome 擴充功能
+  按文字內容常駐隱藏（`toastext/`，worker 上動態產生、不進版控），
+  座標點擊只當備援——toast 重繪、換位置都不怕。
 
 ## 同步規則
 
