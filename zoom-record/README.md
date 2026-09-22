@@ -15,7 +15,8 @@ Mac 下一條指令，在遠端 Linux worker（mlp default image 即可，全新
 - `<host>`：`mlp ssh-config --write` 後能直接 `ssh` 的名字。
 - bot 以匿名顯示名稱入會（預設 `rec-<host>`，`REC_NAME` 可改），
   不開相機（黑畫面）不開麥，低調旁錄。等候室需主持人放行。
-- 錄影只含會議頁面（裁掉瀏覽器框），720p15 H264 + AAC。
+  「Please enable access…」提示條會自動關掉（入會後＋每分鐘巡檢）。
+- 錄影只含會議頁面（裁掉瀏覽器框），1920x940 H264 + AAC。
 
 ## 環境變數
 
@@ -25,6 +26,7 @@ Mac 下一條指令，在遠端 Linux worker（mlp default image 即可，全新
 | `TEST_SECS` | `0` | `>0` 時只錄 N 秒後離開（測試用）；`0`＝錄到散會 |
 | `ADMIT_TIMEOUT_SEC` | `1200` | 等候室等待上限 |
 | `MAX_REC_SEC` | `21600` | 錄影安全上限（6h） |
+| `RES_W` / `RES_H` | `1920` / `1080` | 虛擬螢幕解析度（錄影裁掉上方 140px 瀏覽器框） |
 | `SSH_CFG` | `~/.mylinuxpool/ssh_config` | ssh 設定檔 |
 
 ## 需求

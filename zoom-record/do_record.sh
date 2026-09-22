@@ -30,6 +30,8 @@ REC_NAME="${REC_NAME:-rec-$SAFEHOST}"
 TEST_SECS="${TEST_SECS:-0}"
 ADMIT_TIMEOUT_SEC="${ADMIT_TIMEOUT_SEC:-1200}"
 MAX_REC_SEC="${MAX_REC_SEC:-21600}"
+RES_W="${RES_W:-1920}"
+RES_H="${RES_H:-1080}"
 
 [[ -f "$SSH_CFG" ]] || { echo "do_record: ssh config not found: $SSH_CFG (run: mlp ssh-config --write)" >&2; exit 2; }
 command -v ssh >/dev/null || { echo "do_record: ssh not found" >&2; exit 2; }
@@ -61,6 +63,11 @@ ZNAME="$(printf '%s' "${ZNAME_B64:?}" | base64 -d)"
 TEST_SECS="${TEST_SECS:-0}"
 ADMIT_TIMEOUT_SEC="${ADMIT_TIMEOUT_SEC:-1200}"
 MAX_REC_SEC="${MAX_REC_SEC:-21600}"
+RES_W="${RES_W:-1920}"
+RES_H="${RES_H:-1080}"
+CROP_Y=140
+CROP_H=$((RES_H - CROP_Y))
+export RES_W RES_H
 
 log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*" >&2; }
 die() { log "FATAL: $*"; exit 1; }
@@ -76,6 +83,14 @@ shot() {
 }
 streams() { pactl list short sink-inputs 2>/dev/null | wc -l; }
 wintitle() { xdotool getwindowname "$CHROME_WIN" 2>/dev/null; }
+dismiss_nag() {
+    # "Please enable access to your microphone and camera" toast:
+    # Escape first, then its X (best effort, harmless if absent).
+    DISPLAY=:99 xdotool key Escape 2>/dev/null
+    sleep 1
+    DISPLAY=:99 xdotool mousemove 1320 427 click 1 2>/dev/null
+    sleep 1
+}
 page_state() {
     # screenshot + OCR the meeting tab -> WAITING | PREJOIN | INMEETING | ENDED | UNKNOWN
     local png="$RDIR/state.png" txt tl now mt
@@ -85,6 +100,7 @@ page_state() {
     mt=$(stat -c %Y "$png" 2>/dev/null || echo 0)
     [[ $((now - mt)) -gt 15 ]] && { echo UNKNOWN; return; }
     txt="$(tesseract "$png" stdout 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+    printf '%s' "$txt" > "$RDIR/state.txt"
     if printf '%s' "$txt" | grep -q -E "let them know|waiting room|host will let you in"; then echo WAITING; return; fi
     if printf '%s' "$txt" | grep -q -E "has ended|meeting ended|ended by host"; then echo ENDED; return; fi
     if printf '%s' "$txt" | grep -q -E "link is invalid|invalid meeting|not found|does not exist|no longer available|meeting is over"; then echo INVALID; return; fi
@@ -114,7 +130,7 @@ log "provision ok: $(google-chrome --version 2>/dev/null), $(ffmpeg -hide_banner
 # ---- 2. virtual display + dummy audio ----
 pgrep -x Xvfb >/dev/null 2>&1 || {
     rm -f /tmp/.X11-unix/X99
-    setsid Xvfb :99 -screen 0 1280x720x24 -ac </dev/null >"$RDIR/xvfb.log" 2>&1 &
+    setsid Xvfb :99 -screen 0 ${RES_W}x${RES_H}x24 -ac </dev/null >"$RDIR/xvfb.log" 2>&1 &
 }
 for i in $(seq 1 10); do ls /tmp/.X11-unix/X99 >/dev/null 2>&1 && break; sleep 1; done
 ls /tmp/.X11-unix/X99 >/dev/null 2>&1 || die "Xvfb did not start"
@@ -135,7 +151,7 @@ if DISPLAY=:99 xdotool search --onlyvisible --class google-chrome 2>/dev/null | 
     pkill -9 -x chrome 2>/dev/null; sleep 3
 fi
 rm -rf "$RDIR/chrome-prof"; mkdir -p "$RDIR/chrome-prof"
-setsid bash -c 'DISPLAY=:99 google-chrome --no-sandbox --disable-dev-shm-usage --no-first-run --no-default-browser-check --use-angle=swiftshader --enable-unsafe-swiftshader --autoplay-policy=no-user-gesture-required --window-size=1280,720 --window-position=0,0 --user-data-dir="$0/chrome-prof" "https://app.zoom.us/wc/$1/join"' "$RDIR" "$ZID" </dev/null >"$RDIR/chrome.log" 2>&1 &
+setsid bash -c 'DISPLAY=:99 google-chrome --no-sandbox --disable-dev-shm-usage --no-first-run --no-default-browser-check --use-angle=swiftshader --enable-unsafe-swiftshader --autoplay-policy=no-user-gesture-required --window-size=${RES_W},${RES_H} --window-position=0,0 --user-data-dir="$0/chrome-prof" "https://app.zoom.us/wc/$1/join"' "$RDIR" "$ZID" </dev/null >"$RDIR/chrome.log" 2>&1 &
 CHROME_WIN=""
 for i in $(seq 1 30); do
     CHROME_WIN="$(DISPLAY=:99 xdotool search --onlyvisible --class google-chrome 2>/dev/null | head -n1)"
@@ -153,14 +169,14 @@ sleep 2
 # cookie banner (best effort; only on some loads) then device-permission
 # modals ("Continue without microphone and camera" x2 — OCR-gated).
 # No fake devices on purpose: bot stays camera-off (black tile) + muted.
-DISPLAY=:99 xdotool mousemove 733 397 click 1 2>/dev/null
+DISPLAY=:99 xdotool mousemove 1053 397 click 1 2>/dev/null
 sleep 2
 for i in 1 2 3; do
     rm -f "$RDIR/m.png"
     DISPLAY=:99 scrot "$RDIR/m.png" 2>/dev/null || break
     tesseract "$RDIR/m.png" stdout 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -q "continue without" || break
     log "dismissing device modal ($i)"
-    DISPLAY=:99 xdotool mousemove 640 590 click 1
+    DISPLAY=:99 xdotool mousemove 960 600 click 1
     sleep 3
 done
 shot joinpage
@@ -173,23 +189,23 @@ for i in $(seq 1 6); do
 done
 [[ "$OKFORM" == "1" ]] || { die "join form never loaded (see step_joinpage.png)"; }
 DISPLAY=:99 xdotool windowfocus "$CHROME_WIN"
-DISPLAY=:99 xdotool mousemove 1015 313 click 1
+DISPLAY=:99 xdotool mousemove 1335 313 click 1
 sleep 1
 DISPLAY=:99 xdotool type -- "$ZPW"
 sleep 1
-DISPLAY=:99 xdotool mousemove 1015 392 click 1
+DISPLAY=:99 xdotool mousemove 1335 392 click 1
 sleep 1
 DISPLAY=:99 xdotool type -- "$ZNAME"
 sleep 1
 shot filled
 # submit: keyboard Enter in the name field first (most reliable), then button clicks
-DISPLAY=:99 xdotool mousemove 1015 392 click 1
+DISPLAY=:99 xdotool mousemove 1335 392 click 1
 sleep 1
 DISPLAY=:99 xdotool key Return
 for i in 1 2 3 4 5; do
     sleep 10
     [[ "$(page_state)" != "PREJOIN" ]] && break
-    DISPLAY=:99 xdotool mousemove 1015 478 click 1
+    DISPLAY=:99 xdotool mousemove 1335 478 click 1
     sleep 2
 done
 [[ "$(page_state)" != "PREJOIN" ]] || { die "Join submit did not advance past the form (see step_filled.png)"; }
@@ -216,17 +232,18 @@ log "admitted (audio streams flowing)"
 sleep 3
 shot admitted
 # dismiss in-meeting toasts (best effort)
-DISPLAY=:99 xdotool mousemove 1095 285 click 1 2>/dev/null
+DISPLAY=:99 xdotool mousemove 1415 285 click 1 2>/dev/null
 sleep 1
-DISPLAY=:99 xdotool mousemove 990 362 click 1 2>/dev/null
+DISPLAY=:99 xdotool mousemove 1310 362 click 1 2>/dev/null
 sleep 1
+dismiss_nag
 
 # ---- 6. record ----
 rm -f "$OUTMP4"
 log "recording to $OUTMP4 ..."
-# crop to page area only (y=140,h=580): no browser tabs/omnibox/infobar in the mp4.
+# crop to page area only (y=140): no browser tabs/omnibox/infobar in the mp4.
 DISPLAY=:99 ffmpeg -hide_banner -y -loglevel warning \
-    -video_size 1280x580 -framerate 15 -f x11grab -i :99+0,140 \
+    -video_size ${RES_W}x${CROP_H} -framerate 15 -f x11grab -i :99+0,${CROP_Y} \
     -f pulse -ac 2 -i "$MON" \
     -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p \
     -c:a aac -b:a 128k -movflags +faststart "$OUTMP4" >"$RDIR/ffmpeg.log" 2>&1 &
@@ -238,9 +255,9 @@ log "ffmpeg pid $FFPID recording"
 leave_meeting() {
     log "leaving meeting politely ..."
     DISPLAY=:99 xdotool windowfocus "$CHROME_WIN" 2>/dev/null
-    DISPLAY=:99 xdotool mousemove 640 700 2>/dev/null; sleep 2
-    DISPLAY=:99 xdotool mousemove 1243 700 click 1 2>/dev/null; sleep 4
-    DISPLAY=:99 xdotool mousemove 1095 633 click 1 2>/dev/null; sleep 4
+    DISPLAY=:99 xdotool mousemove 960 1060 2>/dev/null; sleep 2
+    DISPLAY=:99 xdotool mousemove 1875 1060 click 1 2>/dev/null; sleep 4
+    DISPLAY=:99 xdotool mousemove 1735 633 click 1 2>/dev/null; sleep 4
 }
 stop_ffmpeg() {
     kill -INT "$FFPID" 2>/dev/null
@@ -274,6 +291,10 @@ else
             OCR_TICK=0
             ST="$(page_state)"; log "ocr state=$ST"
             [[ "$ST" == "ENDED" ]] && { log "meeting ended (host)"; break; }
+            if grep -q "please enable access" "$RDIR/state.txt" 2>/dev/null; then
+                log "nag banner back, dismissing ..."
+                dismiss_nag
+            fi
         fi
     done
     stop_ffmpeg
@@ -294,7 +315,7 @@ echo "do_record: payload uploaded" >&2
 echo "do_record: launching remote recorder on $HOST (name=$REC_NAME, detached) ..." >&2
 # shellcheck disable=SC2029
 ssh -F "$SSH_CFG" -o BatchMode=yes -o ConnectTimeout=15 "$HOST" \
-    "rm -f /tmp/mlprec/run.out; ZID_B64='$ZID_B64' ZPW_B64='$ZPW_B64' ZNAME_B64='$ZNAME_B64' TEST_SECS='$TEST_SECS' ADMIT_TIMEOUT_SEC='$ADMIT_TIMEOUT_SEC' MAX_REC_SEC='$MAX_REC_SEC' setsid bash /tmp/mlprec/run.sh </dev/null >>/tmp/mlprec/run.out 2>&1 & echo LAUNCHED" \
+    "rm -f /tmp/mlprec/run.out; ZID_B64='$ZID_B64' ZPW_B64='$ZPW_B64' ZNAME_B64='$ZNAME_B64' TEST_SECS='$TEST_SECS' ADMIT_TIMEOUT_SEC='$ADMIT_TIMEOUT_SEC' MAX_REC_SEC='$MAX_REC_SEC' RES_W='$RES_W' RES_H='$RES_H' setsid bash /tmp/mlprec/run.sh </dev/null >>/tmp/mlprec/run.out 2>&1 & echo LAUNCHED" \
     || { echo "do_record: remote launch failed" >&2; exit 1; }
 
 WAIT_BUDGET=$(( ADMIT_TIMEOUT_SEC + 300 ))
