@@ -122,7 +122,7 @@ for line in out.splitlines()[1:]:
     p = line.split('\t')
     if len(p) < 12 or p[0] != '5':
         continue
-    if p[11].strip().lower().strip('.,!?"\'') == w:
+    if p[11].strip().lower().strip('.,!?"\'\u2019\u2018\u201c\u201d') == w:
         x, y, ww, hh = int(p[6]), int(p[7]), int(p[8]), int(p[9])
         if dx == -1 and dy == -1:
             print(f"{x + ww // 2} {y + hh // 2}")
@@ -153,6 +153,12 @@ dismiss_nag() {
             break
         fi
     done
+    xy="$(click_word "$png" "acceleration" 243 5)"
+    if [[ -n "$xy" ]]; then
+        log "dismissing accel toast at $xy"
+        DISPLAY=:99 xdotool mousemove $xy click 1 2>/dev/null
+        sleep 2
+    fi
     DISPLAY=:99 xdotool mousemove 10 930 2>/dev/null
 }
 page_state() {
