@@ -144,8 +144,10 @@ page_state() {
     if printf '%s' "$txt" | grep -q -E "has ended|meeting ended|ended by host"; then echo ENDED; return; fi
     if printf '%s' "$txt" | grep -q -E "link is invalid|invalid meeting|not found|does not exist|no longer available|meeting is over"; then echo INVALID; return; fi
     if printf '%s' "$txt" | grep -q -E "enter meeting info|meeting passcode|your name"; then echo PREJOIN; return; fi
-    tl="$(wintitle)"
-    case "$tl" in *"Zoom Meeting - Google Chrome"*) echo INMEETING ;; *) echo UNKNOWN ;; esac
+    # INMEETING needs POSITIVE evidence (toolbar words). Empty/truncated OCR
+    # must yield UNKNOWN, never INMEETING (false admit 2026-09-22).
+    if printf '%s' "$txt" | grep -q -i -E "participants|leave meeting"; then echo INMEETING; return; fi
+    echo UNKNOWN
 }
 
 # ---- 1. provision (idempotent; safe on fresh default workers) ----
