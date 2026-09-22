@@ -84,11 +84,14 @@ shot() {
 streams() { pactl list short sink-inputs 2>/dev/null | wc -l; }
 wintitle() { xdotool getwindowname "$CHROME_WIN" 2>/dev/null; }
 dismiss_nag() {
-    # "Please enable access to your microphone and camera" toast:
-    # Escape first, then its X (best effort, harmless if absent).
+    # "Please enable access to your microphone and camera" toast + AI toast:
+    # unconditional Escape + X clicks (best effort, harmless if absent).
+    # Calibrated 1920x1080 2026-09-22 from recording frames.
     DISPLAY=:99 xdotool key Escape 2>/dev/null
     sleep 1
-    DISPLAY=:99 xdotool mousemove 1320 427 click 1 2>/dev/null
+    DISPLAY=:99 xdotool mousemove 1217 362 click 1 2>/dev/null
+    sleep 1
+    DISPLAY=:99 xdotool mousemove 1727 282 click 1 2>/dev/null
     sleep 1
 }
 page_state() {
@@ -106,7 +109,7 @@ page_state() {
     if printf '%s' "$txt" | grep -q -E "let them know|waiting room|host will let you in"; then echo WAITING; return; fi
     if printf '%s' "$txt" | grep -q -E "has ended|meeting ended|ended by host"; then echo ENDED; return; fi
     if printf '%s' "$txt" | grep -q -E "link is invalid|invalid meeting|not found|does not exist|no longer available|meeting is over"; then echo INVALID; return; fi
-    if printf '%s' "$txt" | grep -q -E "enter meeting info|meeting passcode"; then echo PREJOIN; return; fi
+    if printf '%s' "$txt" | grep -q -E "enter meeting info|meeting passcode|your name"; then echo PREJOIN; return; fi
     tl="$(wintitle)"
     case "$tl" in *"Zoom Meeting - Google Chrome"*) echo INMEETING ;; *) echo UNKNOWN ;; esac
 }
@@ -130,12 +133,16 @@ fi
 log "provision ok: $(google-chrome --version 2>/dev/null), $(ffmpeg -hide_banner -version 2>/dev/null | head -n1)"
 
 # ---- 2. virtual display + dummy audio ----
-pgrep -x Xvfb >/dev/null 2>&1 || {
+CUR="$(DISPLAY=:99 xdotool getdisplaygeometry 2>/dev/null || echo none)"
+if [[ "$CUR" != "${RES_W} x ${RES_H}" ]]; then
+    log "display is '$CUR', want ${RES_W}x${RES_H} — (re)starting Xvfb ..."
+    pkill -x Xvfb 2>/dev/null; sleep 2
     rm -f /tmp/.X11-unix/X99
     setsid Xvfb :99 -screen 0 ${RES_W}x${RES_H}x24 -ac </dev/null >"$RDIR/xvfb.log" 2>&1 &
-}
-for i in $(seq 1 10); do ls /tmp/.X11-unix/X99 >/dev/null 2>&1 && break; sleep 1; done
+    for i in $(seq 1 10); do ls /tmp/.X11-unix/X99 >/dev/null 2>&1 && break; sleep 1; done
+fi
 ls /tmp/.X11-unix/X99 >/dev/null 2>&1 || die "Xvfb did not start"
+log "display: $(DISPLAY=:99 xdotool getdisplaygeometry 2>/dev/null)"
 pactl info >/dev/null 2>&1 || pulseaudio -D --exit-idle-time=-1 --disallow-exit 2>&1 | head -n 2 >&2
 sleep 1
 MON="$(pactl list short sources 2>/dev/null | awk '/monitor/ {print $2; exit}')"
@@ -171,20 +178,23 @@ sleep 2
 # cookie banner (OCR-gated; covers the form on fresh profiles) then
 # device-permission modals ("Continue without microphone and camera" — OCR-gated).
 # No fake devices on purpose: bot stays camera-off (black tile) + muted.
+DISPLAY=:99 xdotool mousemove 1100 595 click 1 2>/dev/null
+sleep 2
 for i in 1 2; do
     rm -f "$RDIR/ck.png"
     DISPLAY=:99 scrot "$RDIR/ck.png" 2>/dev/null || break
     tesseract "$RDIR/ck.png" stdout 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -q "accept cookies" || break
     log "accepting cookies ($i)"
-    DISPLAY=:99 xdotool mousemove 1010 450 click 1
+    DISPLAY=:99 xdotool mousemove 1100 595 click 1
     sleep 3
 done
+# device modals, gated on their TITLE (link text OCRs unreliably under the dim overlay)
 for i in 1 2 3; do
     rm -f "$RDIR/m.png"
     DISPLAY=:99 scrot "$RDIR/m.png" 2>/dev/null || break
-    tesseract "$RDIR/m.png" stdout 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -q "continue without" || break
+    tesseract "$RDIR/m.png" stdout 2>/dev/null | tr '[:upper:]' '[:lower:]' | grep -q "do you want people" || break
     log "dismissing device modal ($i)"
-    DISPLAY=:99 xdotool mousemove 960 600 click 1
+    DISPLAY=:99 xdotool mousemove 975 765 click 1
     sleep 3
 done
 shot joinpage
@@ -197,23 +207,23 @@ for i in $(seq 1 6); do
 done
 [[ "$OKFORM" == "1" ]] || { die "join form never loaded (see step_joinpage.png)"; }
 DISPLAY=:99 xdotool windowfocus "$CHROME_WIN"
-DISPLAY=:99 xdotool mousemove 1335 313 click 1
+DISPLAY=:99 xdotool mousemove 1355 485 click 1
 sleep 1
 DISPLAY=:99 xdotool type -- "$ZPW"
 sleep 1
-DISPLAY=:99 xdotool mousemove 1335 392 click 1
+DISPLAY=:99 xdotool mousemove 1355 555 click 1
 sleep 1
 DISPLAY=:99 xdotool type -- "$ZNAME"
 sleep 1
 shot filled
 # submit: keyboard Enter in the name field first (most reliable), then button clicks
-DISPLAY=:99 xdotool mousemove 1335 392 click 1
+DISPLAY=:99 xdotool mousemove 1355 555 click 1
 sleep 1
 DISPLAY=:99 xdotool key Return
 for i in 1 2 3 4 5; do
     sleep 10
     [[ "$(page_state)" != "PREJOIN" ]] && break
-    DISPLAY=:99 xdotool mousemove 1335 478 click 1
+    DISPLAY=:99 xdotool mousemove 1355 630 click 1
     sleep 2
 done
 [[ "$(page_state)" != "PREJOIN" ]] || { die "Join submit did not advance past the form (see step_filled.png)"; }
@@ -240,9 +250,7 @@ log "admitted (audio streams flowing)"
 sleep 3
 shot admitted
 # dismiss in-meeting toasts (best effort)
-DISPLAY=:99 xdotool mousemove 1415 285 click 1 2>/dev/null
-sleep 1
-DISPLAY=:99 xdotool mousemove 1310 362 click 1 2>/dev/null
+DISPLAY=:99 xdotool mousemove 1727 282 click 1 2>/dev/null
 sleep 1
 dismiss_nag
 
@@ -299,10 +307,7 @@ else
             OCR_TICK=0
             ST="$(page_state)"; log "ocr state=$ST"
             [[ "$ST" == "ENDED" ]] && { log "meeting ended (host)"; break; }
-            if grep -q "please enable access" "$RDIR/state.txt" 2>/dev/null; then
-                log "nag banner back, dismissing ..."
-                dismiss_nag
-            fi
+            dismiss_nag
         fi
     done
     stop_ffmpeg
