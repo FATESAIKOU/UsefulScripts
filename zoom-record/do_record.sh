@@ -131,19 +131,30 @@ for line in out.splitlines()[1:]:
         break
 PYEOF
 }
+ocr_crop() {
+    # OCR a screen region (x y w h of $RDIR/nag.png) -> lowercase text.
+    # Small crops OCR completely; full shots often truncate. No-ops on failure.
+    local c="$RDIR/crop.png"
+    ffmpeg -hide_banner -y -loglevel error -i "$RDIR/nag.png" -vf crop=$3:$4:$1:$2 "$c" 2>/dev/null || return 1
+    tesseract "$c" stdout 2>/dev/null | tr '[:upper:]' '[:lower:]'
+}
 dismiss_nag() {
-    # Kill the mid-screen "Please enable access..." banner (X sits ~595px
-    # right of "Please") and the AI "Got it" toast. No-ops when absent.
-    # Park the cursor out of the way afterwards.
-    local png="$RDIR/nag.png" xy
+    # Kill toast overlays. Banner/toast X positions drift between sessions,
+    # so: OCR-gate on cropped regions, then sweep-click the X zone.
+    # All clicks are harmless single clicks on empty/meeting area if absent.
+    local png="$RDIR/nag.png" xy t x
     rm -f "$png"
     DISPLAY=:99 scrot "$png" 2>/dev/null || return 0
-    xy="$(click_word "$png" "Please" 582 7)"
-    if [[ -n "$xy" ]]; then
-        log "dismissing nag banner at $xy"
-        DISPLAY=:99 xdotool mousemove $xy click 1 2>/dev/null
-        sleep 2
+    # 1. mid-screen "Please enable access..." banner -> sweep its right end
+    t="$(ocr_crop 0 300 1920 300)"
+    if printf '%s' "$t" | grep -q "please enable access"; then
+        log "sweeping nag X ..."
+        for x in 1250 1270 1290 1310 1330; do
+            DISPLAY=:99 xdotool mousemove $x 415 click 1 2>/dev/null
+            sleep 1
+        done
     fi
+    # 2. AI "Got it" toast -> TSV word-center (proven 2x)
     for gw in Got Gotit; do
         xy="$(click_word "$png" "$gw" -1 -1)"
         if [[ -n "$xy" ]]; then
@@ -153,11 +164,14 @@ dismiss_nag() {
             break
         fi
     done
-    xy="$(click_word "$png" "acceleration" 243 5)"
-    if [[ -n "$xy" ]]; then
-        log "dismissing accel toast at $xy"
-        DISPLAY=:99 xdotool mousemove $xy click 1 2>/dev/null
-        sleep 2
+    # 3. accel toast ("...graphics/hardware acceleration") -> sweep right end
+    t="$(ocr_crop 900 150 1020 300)"
+    if printf '%s' "$t" | grep -q "acceleration"; then
+        log "sweeping accel X ..."
+        for x in 1280 1300 1320 1340; do
+            DISPLAY=:99 xdotool mousemove $x 355 click 1 2>/dev/null
+            sleep 1
+        done
     fi
     DISPLAY=:99 xdotool mousemove 10 930 2>/dev/null
 }
