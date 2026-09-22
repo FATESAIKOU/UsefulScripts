@@ -114,23 +114,30 @@ dismiss_nag() {
     local png="$RDIR/nag.png" xy
     rm -f "$png"
     DISPLAY=:99 scrot "$png" 2>/dev/null || return 0
-    xy="$(click_word "$png" "Please" 624 -10)"
+    xy="$(click_word "$png" "Please" 582 7)"
     if [[ -n "$xy" ]]; then
         log "dismissing nag banner at $xy"
         DISPLAY=:99 xdotool mousemove $xy click 1 2>/dev/null
         sleep 2
     fi
-    xy="$(click_word "$png" "Got" -1 -1)"
-    if [[ -n "$xy" ]]; then
-        log "dismissing AI toast at $xy"
-        DISPLAY=:99 xdotool mousemove $xy click 1 2>/dev/null
-        sleep 2
-    fi
+    for gw in Got Gotit; do
+        xy="$(click_word "$png" "$gw" -1 -1)"
+        if [[ -n "$xy" ]]; then
+            log "dismissing AI toast at $xy"
+            DISPLAY=:99 xdotool mousemove $xy click 1 2>/dev/null
+            sleep 2
+            break
+        fi
+    done
     DISPLAY=:99 xdotool mousemove 10 930 2>/dev/null
 }
 page_state() {
     # screenshot + OCR the meeting tab -> WAITING | PREJOIN | INMEETING | ENDED | UNKNOWN
     local png="$RDIR/state.png" txt tl now mt
+    # jiggle the mouse first: the meeting toolbar auto-hides when idle, and
+    # without it OCR sees no in-meeting evidence (false UNKNOWN 2026-09-22).
+    DISPLAY=:99 xdotool mousemove 960 1060 2>/dev/null
+    sleep 1
     tl="$(wintitle)"
     case "$tl" in *"Error - Zoom"*) echo INVALID; return ;; esac
     now=$(date +%s)
