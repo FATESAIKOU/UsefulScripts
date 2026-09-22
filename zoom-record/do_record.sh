@@ -83,16 +83,50 @@ shot() {
 }
 streams() { pactl list short sink-inputs 2>/dev/null | wc -l; }
 wintitle() { xdotool getwindowname "$CHROME_WIN" 2>/dev/null; }
+click_word() {
+    # tsv-guided click: find WORD in screenshot, click at (left+DX, top+DY).
+    # DX/DY = -1/-1 means word-box center. Prints "x y" or nothing.
+    python3 - "$1" "$2" "$3" "$4" <<'PYEOF' 2>/dev/null
+import sys, subprocess
+png, w, dx, dy = sys.argv[1], sys.argv[2].lower(), int(sys.argv[3]), int(sys.argv[4])
+try:
+    out = subprocess.run(['tesseract', png, 'stdout', 'tsv'],
+                         capture_output=True, text=True, timeout=25).stdout
+except Exception:
+    return
+for line in out.splitlines()[1:]:
+    p = line.split('\t')
+    if len(p) < 12 or p[0] != '5':
+        continue
+    if p[11].strip().lower().strip('.,!?"\'') == w:
+        x, y, ww, hh = int(p[6]), int(p[7]), int(p[8]), int(p[9])
+        if dx == -1 and dy == -1:
+            print(f"{x + ww // 2} {y + hh // 2}")
+        else:
+            print(f"{x + dx} {y + dy}")
+        break
+PYEOF
+}
 dismiss_nag() {
-    # "Please enable access to your microphone and camera" toast + AI toast:
-    # unconditional Escape + X clicks (best effort, harmless if absent).
-    # Calibrated 1920x1080 2026-09-22 from recording frames.
-    DISPLAY=:99 xdotool key Escape 2>/dev/null
-    sleep 1
-    DISPLAY=:99 xdotool mousemove 1217 362 click 1 2>/dev/null
-    sleep 1
-    DISPLAY=:99 xdotool mousemove 1727 282 click 1 2>/dev/null
-    sleep 1
+    # Kill the mid-screen "Please enable access..." banner (X sits ~595px
+    # right of "Please") and the AI "Got it" toast. No-ops when absent.
+    # Park the cursor out of the way afterwards.
+    local png="$RDIR/nag.png" xy
+    rm -f "$png"
+    DISPLAY=:99 scrot "$png" 2>/dev/null || return 0
+    xy="$(click_word "$png" "Please" 595 10)"
+    if [[ -n "$xy" ]]; then
+        log "dismissing nag banner at $xy"
+        DISPLAY=:99 xdotool mousemove $xy click 1 2>/dev/null
+        sleep 2
+    fi
+    xy="$(click_word "$png" "Got" -1 -1)"
+    if [[ -n "$xy" ]]; then
+        log "dismissing AI toast at $xy"
+        DISPLAY=:99 xdotool mousemove $xy click 1 2>/dev/null
+        sleep 2
+    fi
+    DISPLAY=:99 xdotool mousemove 10 930 2>/dev/null
 }
 page_state() {
     # screenshot + OCR the meeting tab -> WAITING | PREJOIN | INMEETING | ENDED | UNKNOWN
@@ -250,8 +284,6 @@ log "admitted (audio streams flowing)"
 sleep 3
 shot admitted
 # dismiss in-meeting toasts (best effort)
-DISPLAY=:99 xdotool mousemove 1727 282 click 1 2>/dev/null
-sleep 1
 dismiss_nag
 
 # ---- 6. record ----
