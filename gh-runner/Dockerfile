@@ -22,10 +22,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     python3-venv \
     python3-yaml \
+    openssh-client \
+    python3-pytest \
+    gettext-base \
+    fzf \
+    openssl \
+    rsync \
     && rm -rf /var/lib/apt/lists/*
 
-# Install PyYAML >= 6 via pip for workflow requirements
-RUN pip install --break-system-packages 'PyYAML>=6'
+# Install PyYAML, jsonschema, and linode-cli via pip for workflow requirements
+RUN pip install --no-cache-dir --break-system-packages pyyaml jsonschema linode-cli
 
 # 2. Install GitHub CLI (gh)
 RUN mkdir -p -m 755 /etc/apt/keyrings \
@@ -43,7 +49,9 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
 
 # 4. Setup hostedtoolcache structure and create unprivileged runner user
 ENV RUNNER_TOOL_CACHE=/opt/hostedtoolcache
-ENV PIP_BREAK_SYSTEM_PACKAGES=1
+ENV PIP_BREAK_SYSTEM_PACKAGES=1 \
+    PIP_USER=1 \
+    PATH="/home/runner/.local/bin:${PATH}"
 
 ARG RUNNER_UID=1001
 

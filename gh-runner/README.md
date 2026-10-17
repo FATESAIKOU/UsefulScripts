@@ -1,12 +1,12 @@
 # gh-runner
 
-GitHub Actions Self-Hosted Runner 容器化工具，專為一人公司的 Private 儲存庫（`MyPMO`、`MyBrain`、`MyAiEntry`）提供輕量、安全且隔離的背景執行環境。
+GitHub Actions Self-Hosted Runner 容器化工具，專為一人公司的 Private 儲存庫（`MyPMO`、`MyBrain`、`MyAiEntry`、`MyLinuxPool`）提供輕量、安全且隔離的背景執行環境。
 
 ---
 
 ## 1. 設計原則與核心用途
 
-- **只登錄 Private Repo，絕不碰 Public Repo**：在每次啟動 runner 容器前，腳本會硬性透過 GitHub CLI 驗證目標儲存庫的 visibility 必須為 `true:private`。若為 public 或查詢失敗，立即中斷退出，堅決不讓 self-hosted runner 暴露於 public repo 的 Pull Request 執行風險中。
+- **只登錄 Private Repo，絕不碰 Public Repo**：在每次啟動 runner 容器前，腳本會硬性透過 GitHub CLI 驗證目標儲存庫的 visibility 必須為 `true:private`。若為 public 或查詢失敗，立即中斷退出，堅決不讓 self-hosted runner 暴露於 public repo 的 Pull Request 執行風險中。（注意：`MyLinuxPool` 必須在 GitHub 上切換為 Private 後方可登錄）。
 - **嚴格憑證隔離，長期 PAT 永不進容器，單次 Token 瞬間清空**：宿主機使用 Personal Access Token (PAT) 透過 `curl --config -` 向 GitHub API 換取單次 registration token，PAT 永不傳入容器，更不上 `docker run -e` 命令列參數；單次 registration token 掛載入容器後，在 `./config.sh` 註冊瞬間立即清空為 0 bytes，workflow job 絕無機會讀取到有效憑證。
 - **宿主機與容器邊界保護**：
   - 嚴禁掛載 `/var/run/docker.sock`（防止 container breakout）。
@@ -24,10 +24,11 @@ Runner 需要一個具備儲存庫管理權限的 Fine-grained Personal Access T
 1. 前往 GitHub **Settings -> Developer settings -> Personal access tokens -> Fine-grained tokens**。
 2. 建立新 Token：
    - **Token name**：`POOL_PROVIDER__GH_PRIVATE_RUNNER__ADMIN`
-   - **Repository access**：**Only select repositories**，只勾選：
+   - **Repository access**：**Only select repositories**，勾選：
      - `MyPMO`
      - `MyBrain`
      - `MyAiEntry`
+     - `MyLinuxPool`
    - **Repository permissions**：
      - **Administration**：`Read and write`（僅用於註冊 self-hosted runner，其餘權限皆不給）
 3. 儲存 Token 於宿主機指定路徑（預設：`~/.config/gh-runner/token`）：
@@ -47,14 +48,16 @@ Runner 需要一個具備儲存庫管理權限的 Fine-grained Personal Access T
 
 ### 啟動 Runner 容器 (`up`)
 ```bash
-# 預設為 MyPMO, MyBrain, MyAiEntry 三個 repo 各自啟動一個容器
+# 預設為 MyPMO, MyBrain, MyAiEntry, MyLinuxPool 四個 repo 各自啟動一個容器
+# （MyLinuxPool 需已切換為 Private 儲存庫）
 ./gh-runner.sh up
 
 # 啟動時強制重新建置 Docker 映像檔
 ./gh-runner.sh up --build
 
-# 指定特定 repo 啟動（單一或多個）
+# 指定特定 repo 啟動（單一或多個，支援 positional 或 --repo 參數）
 ./gh-runner.sh up MyPMO
+./gh-runner.sh up --repo MyLinuxPool
 ./gh-runner.sh up MyPMO MyBrain
 ```
 
@@ -65,11 +68,16 @@ Runner 需要一個具備儲存庫管理權限的 Fine-grained Personal Access T
 
 # 停止並移除指定 repo 的 runner 容器
 ./gh-runner.sh down MyPMO
+./gh-runner.sh down --repo MyLinuxPool
 ```
 
 ### 查看容器狀態 (`status`)
 ```bash
+# 列出目前所有 gh-runner-* 容器狀態（預設檢查 4 個儲存庫）
 ./gh-runner.sh status
+
+# 查看指定儲存庫的 runner 容器狀態
+./gh-runner.sh status --repo MyLinuxPool
 ```
 
 ### 建置 Docker 映像檔 (`build`)
@@ -79,7 +87,7 @@ Runner 需要一個具備儲存庫管理權限的 Fine-grained Personal Access T
 
 ### 環境變數客製化
 - `GH_RUNNER_TOKEN_FILE`：指定 PAT 檔案路徑（預設 `~/.config/gh-runner/token`）。
-- `GH_RUNNER_REPOS`：自訂預設 repo 清單（空白分隔，預設 `"MyPMO MyBrain MyAiEntry"`）。
+- `GH_RUNNER_REPOS`：自訂預設 repo 清單（空白分隔，預設 `"MyPMO MyBrain MyAiEntry MyLinuxPool"`）。
 - `GH_RUNNER_OWNER`：預設組織或擁有者（預設 `"FATESAIKOU"`）。
 - `GH_RUNNER_LABELS`：Runner 標籤（預設 `"fh-runner"`）。
 - `GH_RUNNER_IMAGE`：映像檔名稱（預設 `"mlp-gh-runner:latest"`）。
@@ -104,14 +112,27 @@ jobs:
           gh --version
 ```
 
+### 預裝依賴對照表（Workflow Audit）
+
+因容器以非特權帳號 `runner` 執行且 `--cap-drop ALL`，所有儲存庫 workflow 所需套件皆已預裝於映像檔中：
+
+| 儲存庫 | Workflows / Actions 涵蓋清單 | 預裝依賴工具與作用 |
+|---|---|---|
+| **`MyPMO`** | `validate.yml`, `sync.yml` | `python3` (3.12), `python3-pip`, `python3-yaml`, `gh`, `git`, `bash`, `jq`, `curl` |
+| **`MyBrain`** | `okf-check.yml` | `python3` (3.12), `python3-pip`, `PyYAML>=6`, `actions/setup-python@v6` toolcache |
+| **`MyAiEntry`** | `ci.yml` | Node.js 24 (`node`, `npm`, `npx`), `actions/setup-node@v4` toolcache |
+| **`MyLinuxPool`** | `ci.yml`, `create-worker.yml`, `delete-worker.yml`, `refresh-authorized-keys.yml`, `repair-gateway.yml`, `rotate-gateway.yml`, `.github/actions/pool-ssh`, `.github/actions/push-state`, `linode/action-linode-cli@v1` | `openssh-client` (`ssh`, `scp`, `ssh-agent`, `ssh-add`, `ssh-keygen`), `python3-pytest` (單元測試), `gettext-base` (`envsubst` 設定檔渲染), `fzf` (`mlp` CLI 必要依賴), `openssl` (金鑰與加密操作), `rsync` (客戶端同步測試), `linode-cli` (Linode 管理 CLI), `pyyaml`, `jsonschema`, `gh`, `git`, `jq`, `curl`, `bash` |
+
 ### 內建執行環境與 Tool Cache
 容器映像檔預裝以下工具以完全相容各 repo 的 workflow：
-- **Python 3.12**：內建 `python3`, `pip`, `venv`，並已安裝 `PyYAML>=6`（滿足 `MyPMO`、`MyBrain`）。
+- **系統基礎工具**：`git`, `jq`, `curl`, `ca-certificates`, `tar`, `gzip`, `unzip`, `gnupg`。
+- **SSH 與維運套件**：`openssh-client` (`ssh`, `scp`, `ssh-agent`, `ssh-add`, `ssh-keygen`), `rsync`, `openssl`, `gettext-base` (`envsubst`), `fzf`。
+- **Python 3.12 環境**：內建 `python3`, `pip`, `venv`, `python3-yaml`, `python3-pytest`，並以 pip 預裝 `pyyaml`, `jsonschema`, `linode-cli`。
+- **Pip 非特權執行環境**：設定 `PIP_BREAK_SYSTEM_PACKAGES=1`、`PIP_USER=1` 及 `PATH="/home/runner/.local/bin:${PATH}"`，當 `linode/action-linode-cli@v1` 或其他 workflow step 於 runtime 執行 `pip install` 時，自動安裝至使用者目錄且可直接在 PATH 執行。
 - **Node.js 24**：內建 `node`, `npm`, `npx`（滿足 `MyAiEntry`）。
-- **GitHub CLI (`gh`)**：官方最新版本（滿足 `MyPMO` issue/PR 操作）。
-- **Actions Tool Cache**：已預先建立 `/opt/hostedtoolcache` 目錄架構及 `.complete` 標記。當 workflow 使用 `actions/setup-python@v6` (`python-version: '3.12'`) 或 `actions/setup-node@v4` (`node-version: 24`) 時，會直接命中本機快取，省去每次下載時間。
+- **GitHub CLI (`gh`)**：官方最新版本（滿足 issue/PR 操作）。
+- **Actions Tool Cache**：已預先建立 `/opt/hostedtoolcache` 目錄架構及 `.complete` 標記。當 workflow 使用 `actions/setup-python@v6` (`python-version: '3.12'`) 或 `actions/setup-node@v4` (`node-version: 24`) 時，直接命中本機快取。
 - **GitHub Actions Runner**：採用官方最新穩定版本 `2.338.0`。
-- **基礎系統工具**：`git`, `jq`, `curl`, `ca-certificates`, `tar`, `gzip`, `unzip`。
 
 ---
 

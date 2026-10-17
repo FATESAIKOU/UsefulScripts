@@ -481,8 +481,17 @@ if [ -f "${DOCKERFILE}" ]; then
      echo "${df_content}" | grep -q "node" && \
      echo "${df_content}" | grep -q "/opt/hostedtoolcache" && \
      echo "${df_content}" | grep -q "PIP_BREAK_SYSTEM_PACKAGES=1" && \
+     echo "${df_content}" | grep -q "PIP_USER=1" && \
+     echo "${df_content}" | grep -q "/home/runner/\.local/bin" && \
+     echo "${df_content}" | grep -q "openssh-client" && \
+     echo "${df_content}" | grep -q "python3-pytest" && \
+     echo "${df_content}" | grep -q "gettext-base" && \
+     echo "${df_content}" | grep -q "fzf" && \
+     echo "${df_content}" | grep -q "openssl" && \
+     echo "${df_content}" | grep -q "rsync" && \
+     echo "${df_content}" | grep -q "linode-cli" && \
      echo "${df_content}" | grep -q "USER runner"; then
-    echo "  - Dockerfile contains python3, gh, node, /opt/hostedtoolcache, PIP_BREAK_SYSTEM_PACKAGES=1, and unprivileged runner user."
+    echo "  - Dockerfile contains python3, gh, node, /opt/hostedtoolcache, PIP settings, MyLinuxPool dependencies, and unprivileged runner user."
   else
     fail "T6: Dockerfile is missing required components!"
     t6_passed=false
@@ -714,6 +723,85 @@ fi
 
 if [ "$t9_passed" = true ]; then
   pass "T9: Host UID alignment passed to docker build and Dockerfile contains version 2.338.0 and UID conflict resolution."
+fi
+
+# -----------------------------------------------------------------
+# T10: MyLinuxPool Support & Default Repos Check
+# -----------------------------------------------------------------
+echo ""
+echo "--- Running T10: MyLinuxPool Support & Default Repos Check ---"
+t10_passed=true
+
+# 1. Verify status without --repo lists all 4 default repos
+set +e
+t10_status_out=$("${GH_RUNNER_SCRIPT}" status 2>&1)
+t10_status_exit=$?
+set -e
+
+if [ $t10_status_exit -eq 0 ]; then
+  if echo "${t10_status_out}" | grep -q "MyPMO" && \
+     echo "${t10_status_out}" | grep -q "MyBrain" && \
+     echo "${t10_status_out}" | grep -q "MyAiEntry" && \
+     echo "${t10_status_out}" | grep -q "MyLinuxPool"; then
+    echo "  - gh-runner.sh status checks all 4 default repos (MyPMO, MyBrain, MyAiEntry, MyLinuxPool)."
+  else
+    fail "T10: status output missing one or more default repos: ${t10_status_out}"
+    t10_passed=false
+  fi
+else
+  fail "T10: gh-runner.sh status exited with $t10_status_exit"
+  t10_passed=false
+fi
+
+# 2. Verify up --repo MyLinuxPool with PUBLIC repo fails
+rm -f "${MOCK_TMP}/docker_run_calls.log"
+set +e
+t10_pub_out=$(GH_RUNNER_TOKEN_FILE="${FAKE_TOKEN_FILE}" \
+             GH_MOCK_MODE="public" \
+             "${GH_RUNNER_SCRIPT}" up --repo MyLinuxPool 2>&1)
+t10_pub_exit=$?
+set -e
+
+if [ $t10_pub_exit -ne 0 ]; then
+  if [ ! -f "${MOCK_TMP}/docker_run_calls.log" ]; then
+    if echo "${t10_pub_out}" | grep -q "Only strictly private repositories"; then
+      echo "  - up --repo MyLinuxPool correctly rejected when repo is PUBLIC."
+    else
+      fail "T10: Public repo rejected but expected error message not found: ${t10_pub_out}"
+      t10_passed=false
+    fi
+  else
+    fail "T10: docker run was executed for public MyLinuxPool!"
+    t10_passed=false
+  fi
+else
+  fail "T10: up --repo MyLinuxPool unexpectedly succeeded for public repo!"
+  t10_passed=false
+fi
+
+# 3. Verify up --repo MyLinuxPool with PRIVATE repo succeeds
+rm -f "${MOCK_TMP}/docker_run_calls.log"
+set +e
+t10_priv_out=$(GH_RUNNER_TOKEN_FILE="${FAKE_TOKEN_FILE}" \
+              GH_MOCK_MODE="private" \
+              "${GH_RUNNER_SCRIPT}" up --repo MyLinuxPool 2>&1)
+t10_priv_exit=$?
+set -e
+
+if [ $t10_priv_exit -eq 0 ]; then
+  if [ -f "${MOCK_TMP}/docker_run_calls.log" ] && grep -q "gh-runner-MyLinuxPool" "${MOCK_TMP}/docker_run_calls.log"; then
+    echo "  - up --repo MyLinuxPool succeeded when repo is PRIVATE."
+  else
+    fail "T10: docker run was not executed for private MyLinuxPool!"
+    t10_passed=false
+  fi
+else
+  fail "T10: up --repo MyLinuxPool failed for private repo ($t10_priv_exit): ${t10_priv_out}"
+  t10_passed=false
+fi
+
+if [ "$t10_passed" = true ]; then
+  pass "T10: MyLinuxPool default repo inclusion and private/public enforcement verified."
 fi
 
 echo ""
