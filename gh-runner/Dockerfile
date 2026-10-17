@@ -1,7 +1,7 @@
 FROM ubuntu:24.04
 
 ARG DEBIAN_FRONTEND=noninteractive
-ARG RUNNER_VERSION=2.322.0
+ARG RUNNER_VERSION=2.338.0
 
 # 1. System packages, runner dependencies (.NET 8 runtime), and Python 3.12
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -45,7 +45,14 @@ RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
 ENV RUNNER_TOOL_CACHE=/opt/hostedtoolcache
 ENV PIP_BREAK_SYSTEM_PACKAGES=1
 
-RUN useradd -m -u 1001 -s /bin/bash runner \
+ARG RUNNER_UID=1001
+
+RUN set -eu; \
+    existing_user="$(getent passwd "${RUNNER_UID}" | cut -d: -f1 || true)"; \
+    if [ -n "${existing_user}" ] && [ "${existing_user}" != "runner" ]; then \
+        userdel -r "${existing_user}" 2>/dev/null || userdel "${existing_user}"; \
+    fi; \
+    useradd -m -u "${RUNNER_UID}" -s /bin/bash runner \
     && mkdir -p /runner /work /opt/hostedtoolcache
 
 RUN set -eu; \
