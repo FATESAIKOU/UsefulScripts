@@ -48,9 +48,16 @@ Runner 需要一個具備儲存庫管理權限的 Fine-grained Personal Access T
 
 ### 啟動 Runner 容器 (`up`)
 ```bash
-# 預設為 MyPMO, MyBrain, MyAiEntry, MyLinuxPool 四個 repo 各自啟動一個容器
+# 預設為 MyPMO, MyBrain, MyAiEntry, MyLinuxPool 四個 repo 各自啟動一個容器 (count=1)
 # （MyLinuxPool 需已切換為 Private 儲存庫）
 ./gh-runner.sh up
+
+# 同主機同 repo 啟動多個 Runner 容器（例如啟動 3 個 MyLinuxPool 容器）
+./gh-runner.sh up --count 3 MyLinuxPool
+./gh-runner.sh up -n 2 MyPMO MyLinuxPool
+
+# 設定資源上限（例如限制每個容器最多使用 2 CPUs 與 4GB 記憶體）
+./gh-runner.sh up --count 2 --cpus 2 --memory 4g MyLinuxPool
 
 # 啟動時強制重新建置 Docker 映像檔
 ./gh-runner.sh up --build
@@ -63,7 +70,7 @@ Runner 需要一個具備儲存庫管理權限的 Fine-grained Personal Access T
 
 ### 停止並移除 Runner 容器 (`down`)
 ```bash
-# 停止並移除所有預設 repo 的 runner 容器
+# 停止並移除所有預設 repo 的 runner 容器（包含所有編號實例與舊版無編號容器）
 ./gh-runner.sh down
 
 # 停止並移除指定 repo 的 runner 容器
@@ -73,7 +80,7 @@ Runner 需要一個具備儲存庫管理權限的 Fine-grained Personal Access T
 
 ### 查看容器狀態 (`status`)
 ```bash
-# 列出目前所有 gh-runner-* 容器狀態（預設檢查 4 個儲存庫）
+# 列出目前所有 gh-runner-* 容器狀態（包含所有編號實例與舊版無編號容器）
 ./gh-runner.sh status
 
 # 查看指定儲存庫的 runner 容器狀態
@@ -85,10 +92,22 @@ Runner 需要一個具備儲存庫管理權限的 Fine-grained Personal Access T
 ./gh-runner.sh build
 ```
 
+### 命名規範（Naming Convention）
+- **容器名稱**：`gh-runner-<repo>-<i>`（例如 `gh-runner-MyLinuxPool-1`、`gh-runner-MyLinuxPool-2`）。
+- **Runner 名稱**：`mlp-<host>-<repo>-<i>`（例如 `mlp-fh-l-MyLinuxPool-1`）。
+- **工作目錄 Volume**：`gh-runner-work-<repo>-<i>`（例如 `gh-runner-work-MyLinuxPool-1`，每個容器擁有專屬獨立 Named Volume，徹底杜絕多個 runner 並行構建時的工作目錄衝突）。
+
+### 平滑升級與舊 Runner 清理說明
+- **本機容器自動清理**：執行 `./gh-runner.sh up` 或 `./gh-runner.sh down` 時，腳本會自動檢測並以 `docker rm -f` 移除舊版不帶編號的容器（`gh-runner-<repo>`）以及縮編時多餘的編號容器（例如從 3 台縮減為 2 台時自動清理第 3 台），無需人工手動介入。
+- **GitHub 後台 Offline Runner**：舊版本註冊的 runner 名稱（`mlp-<host>-<repo>`）在容器停止後，GitHub 後台會顯示為 `Offline`。此為 GitHub Actions self-hosted runner 的正常生命週期行為，**不需要手動反註冊**，GitHub 官方後台會在 14 天後自動清理清除；若追求管理面板整潔，亦可隨時至 GitHub 儲存庫的 **Settings > Actions > Runners** 手動點選刪除。
+
 ### 環境變數客製化
 - `GH_RUNNER_TOKEN_FILE`：指定 PAT 檔案路徑（預設 `~/.config/gh-runner/token`）。
 - `GH_RUNNER_REPOS`：自訂預設 repo 清單（空白分隔，預設 `"MyPMO MyBrain MyAiEntry MyLinuxPool"`）。
 - `GH_RUNNER_OWNER`：預設組織或擁有者（預設 `"FATESAIKOU"`）。
+- `GH_RUNNER_COUNT`：每個 repo 啟動的 runner 容器數量（預設 `1`）。
+- `GH_RUNNER_CPUS`：每個容器可使用的 CPU 上限（例如 `2`、`1.5`，預設無限制）。
+- `GH_RUNNER_MEMORY`：每個容器可使用的記憶體上限（例如 `4g`、`512m`，預設無限制）。
 - `GH_RUNNER_LABELS`：Runner 標籤（預設 `"fh-runner"`）。
 - `GH_RUNNER_IMAGE`：映像檔名稱（預設 `"mlp-gh-runner:latest"`）。
 - `GH_RUNNER_HOST`：主機名稱識別碼（預設為 `hostname -s`）。
