@@ -60,6 +60,26 @@ case "$subcmd" in
     exit 0
     ;;
   ps)
+    has_format=0
+    for arg in "$@"; do
+      if [ "$arg" = "--format" ] || [[ "$arg" == --format=* ]]; then
+        has_format=1
+      fi
+    done
+    if [ -f "${MOCK_TMP}/mock_docker_ps_containers.txt" ]; then
+      if [ "$has_format" -eq 1 ]; then
+        cat "${MOCK_TMP}/mock_docker_ps_containers.txt"
+      else
+        echo "CONTAINER ID   IMAGE                  COMMAND           CREATED        STATUS        PORTS     NAMES"
+        while IFS= read -r cname; do
+          [ -n "$cname" ] && echo "1234567890ab   mlp-gh-runner:latest   \"/entrypoint.sh\" 2 hours ago    Up 2 hours              $cname"
+        done < "${MOCK_TMP}/mock_docker_ps_containers.txt"
+      fi
+      exit 0
+    fi
+    if [ "$has_format" -eq 1 ]; then
+      exit 0
+    fi
     echo "CONTAINER ID   IMAGE                  COMMAND           CREATED        STATUS        PORTS     NAMES"
     echo "1234567890ab   mlp-gh-runner:latest   \"/entrypoint.sh\" 2 hours ago    Up 2 hours              gh-runner-MyPMO"
     exit 0
@@ -276,8 +296,8 @@ if [ $t3_exit -eq 0 ]; then
     fi
 
     # 9. Must contain named volume for work
-    if ! echo "${docker_run_cmd}" | grep -q "gh-runner-work-MyPMO:/work"; then
-      fail "T3: Named volume gh-runner-work-MyPMO:/work missing!"
+    if ! echo "${docker_run_cmd}" | grep -q "gh-runner-work-MyPMO-1:/work"; then
+      fail "T3: Named volume gh-runner-work-MyPMO-1:/work missing!"
       t3_checks_passed=false
     fi
 
@@ -522,7 +542,8 @@ down_exit=$?
 set -e
 
 if [ $help_exit -eq 0 ] && [ $status_exit -eq 0 ] && [ $down_exit -eq 0 ]; then
-  if grep -q "rm -f gh-runner-MyPMO" "${MOCK_TMP}/docker_calls.log"; then
+  if grep -q "rm -f gh-runner-MyPMO" "${MOCK_TMP}/docker_calls.log" && \
+     grep -q "rm -f gh-runner-MyPMO-1" "${MOCK_TMP}/docker_calls.log"; then
     pass "T7: Subcommands (help, status, down) executed successfully."
   else
     fail "T7: down command did not execute docker rm as expected!"
@@ -789,7 +810,7 @@ t10_priv_exit=$?
 set -e
 
 if [ $t10_priv_exit -eq 0 ]; then
-  if [ -f "${MOCK_TMP}/docker_run_calls.log" ] && grep -q "gh-runner-MyLinuxPool" "${MOCK_TMP}/docker_run_calls.log"; then
+  if [ -f "${MOCK_TMP}/docker_run_calls.log" ] && grep -q "gh-runner-MyLinuxPool-1" "${MOCK_TMP}/docker_run_calls.log"; then
     echo "  - up --repo MyLinuxPool succeeded when repo is PRIVATE."
   else
     fail "T10: docker run was not executed for private MyLinuxPool!"
@@ -802,6 +823,239 @@ fi
 
 if [ "$t10_passed" = true ]; then
   pass "T10: MyLinuxPool default repo inclusion and private/public enforcement verified."
+fi
+
+# -----------------------------------------------------------------
+# T11: Multi-Runner Count (--count / GH_RUNNER_COUNT), Legacy Migration, Scaling Down, and Resource Limits
+# -----------------------------------------------------------------
+echo ""
+echo "--- Running T11: Multi-Runner Count, Legacy Migration, Scaling Down, and Resource Limits ---"
+t11_passed=true
+TEST_STATE_DIR="${MOCK_TMP}/test_state_t11"
+rm -rf "${TEST_STATE_DIR}" "${MOCK_TMP}/mock_docker_ps_containers.txt"
+mkdir -p "${TEST_STATE_DIR}"
+
+# --- Part 1: up --count 3 MyLinuxPool ---
+echo "  - Part 1: Testing up --count 3 MyLinuxPool..."
+rm -f "${MOCK_TMP}/docker_calls.log" "${MOCK_TMP}/docker_run_calls.log" "${MOCK_TMP}/curl_cli_args.log" "${MOCK_TMP}/curl_stdin.log"
+
+set +e
+t11_1_out=$(GH_RUNNER_TOKEN_FILE="${FAKE_TOKEN_FILE}" \
+           GH_RUNNER_STATE_DIR="${TEST_STATE_DIR}" \
+           GH_MOCK_MODE="private" \
+           "${GH_RUNNER_SCRIPT}" up --count 3 MyLinuxPool 2>&1)
+t11_1_exit=$?
+set -e
+
+if [ $t11_1_exit -eq 0 ]; then
+  # 1.1 Verify curl registration-token endpoint was called exactly 1 time
+  curl_call_count=$(wc -l < "${MOCK_TMP}/curl_cli_args.log" | tr -d ' ')
+  if [ "$curl_call_count" -eq 1 ]; then
+    echo "    * curl registration token exchange called exactly 1 time for the repo."
+  else
+    fail "T11.1: curl registration token exchange called $curl_call_count times (expected 1)!"
+    t11_passed=false
+  fi
+
+  # 1.2 Verify 3 separate registration token files exist in GH_RUNNER_STATE_DIR with 0600 permissions
+  for i in 1 2 3; do
+    tf="${TEST_STATE_DIR}/reg-MyLinuxPool-${i}.token"
+    if [ -f "$tf" ]; then
+      perm=$(stat -c '%a' "$tf" 2>/dev/null || /usr/bin/stat -f '%Lp' "$tf" 2>/dev/null || stat -f '%Lp' "$tf" 2>/dev/null || true)
+      if [ "$perm" = "600" ] || [ "$perm" = "0600" ]; then
+        echo "    * Token file reg-MyLinuxPool-${i}.token exists with 0600 permissions."
+      else
+        fail "T11.1: Token file $tf has unexpected permissions: $perm"
+        t11_passed=false
+      fi
+    else
+      fail "T11.1: Expected token file $tf not found!"
+      t11_passed=false
+    fi
+  done
+
+  # 1.3 Verify legacy unnumbered container gh-runner-MyLinuxPool was removed
+  if grep -E -q "rm -f gh-runner-MyLinuxPool( |$)" "${MOCK_TMP}/docker_calls.log"; then
+    echo "    * Legacy unnumbered container gh-runner-MyLinuxPool cleanup attempted."
+  else
+    fail "T11.1: docker rm -f gh-runner-MyLinuxPool was not executed!"
+    t11_passed=false
+  fi
+
+  # 1.4 Verify 3 docker run calls were made with correct names, labels, and mounts
+  if [ -f "${MOCK_TMP}/docker_run_calls.log" ]; then
+    run_count=$(wc -l < "${MOCK_TMP}/docker_run_calls.log" | tr -d ' ')
+    if [ "$run_count" -eq 3 ]; then
+      for i in 1 2 3; do
+        if grep -q -- "--name gh-runner-MyLinuxPool-${i}" "${MOCK_TMP}/docker_run_calls.log" && \
+           grep -q -- "RUNNER_NAME=mlp-.*-MyLinuxPool-${i}" "${MOCK_TMP}/docker_run_calls.log" && \
+           grep -q -- "gh-runner-work-MyLinuxPool-${i}:/work" "${MOCK_TMP}/docker_run_calls.log" && \
+           grep -q -- "${TEST_STATE_DIR}/reg-MyLinuxPool-${i}.token:/run/secrets/gh_runner_reg_token" "${MOCK_TMP}/docker_run_calls.log"; then
+          echo "    * Container instance ${i} launched with distinct name, runner name, work volume, and token mount."
+        else
+          fail "T11.1: docker run arguments mismatch for instance ${i}!"
+          t11_passed=false
+        fi
+      done
+    else
+      fail "T11.1: docker run called $run_count times (expected 3)!"
+      t11_passed=false
+    fi
+  else
+    fail "T11.1: docker_run_calls.log not found!"
+    t11_passed=false
+  fi
+else
+  fail "T11.1: up --count 3 failed with code $t11_1_exit: $t11_1_out"
+  t11_passed=false
+fi
+
+# --- Part 2: Resource limits & scaling down cleanup ---
+echo "  - Part 2: Testing resource limits & scaling down cleanup..."
+cat << 'EOF' > "${MOCK_TMP}/mock_docker_ps_containers.txt"
+gh-runner-MyLinuxPool-1
+gh-runner-MyLinuxPool-2
+gh-runner-MyLinuxPool-3
+gh-runner-MyLinuxPoolExtra-1
+EOF
+
+rm -f "${MOCK_TMP}/docker_calls.log" "${MOCK_TMP}/docker_run_calls.log"
+
+set +e
+t11_2_out=$(GH_RUNNER_TOKEN_FILE="${FAKE_TOKEN_FILE}" \
+           GH_RUNNER_STATE_DIR="${TEST_STATE_DIR}" \
+           GH_RUNNER_COUNT=2 \
+           GH_RUNNER_CPUS=2 \
+           GH_RUNNER_MEMORY=4g \
+           GH_MOCK_MODE="private" \
+           "${GH_RUNNER_SCRIPT}" up MyLinuxPool 2>&1)
+t11_2_exit=$?
+set -e
+
+if [ $t11_2_exit -eq 0 ]; then
+  # 2.1 Verify excess container gh-runner-MyLinuxPool-3 was removed
+  if grep -q "rm -f gh-runner-MyLinuxPool-3" "${MOCK_TMP}/docker_calls.log"; then
+    echo "    * Excess container gh-runner-MyLinuxPool-3 correctly removed during scale-down."
+  else
+    fail "T11.2: Excess container gh-runner-MyLinuxPool-3 was not removed!"
+    t11_passed=false
+  fi
+
+  # 2.2 Verify different repo container gh-runner-MyLinuxPoolExtra-1 was NOT removed
+  if grep -q "gh-runner-MyLinuxPoolExtra-1" "${MOCK_TMP}/docker_calls.log"; then
+    fail "T11.2: Unrelated container gh-runner-MyLinuxPoolExtra-1 was unexpectedly targeted for removal!"
+    t11_passed=false
+  else
+    echo "    * Unrelated container gh-runner-MyLinuxPoolExtra-1 was not touched."
+  fi
+
+  # 2.3 Verify docker run received resource limits --cpus 2 and --memory 4g
+  if [ -f "${MOCK_TMP}/docker_run_calls.log" ]; then
+    run_log=$(cat "${MOCK_TMP}/docker_run_calls.log")
+    if echo "${run_log}" | grep -q -- "--cpus 2" && echo "${run_log}" | grep -q -- "--memory 4g"; then
+      echo "    * Resource limits --cpus 2 and --memory 4g correctly passed to docker run."
+    else
+      fail "T11.2: Resource limits --cpus 2 or --memory 4g missing in docker run args: ${run_log}"
+      t11_passed=false
+    fi
+  else
+    fail "T11.2: docker_run_calls.log not found!"
+    t11_passed=false
+  fi
+else
+  fail "T11.2: up with resource limits failed with code $t11_2_exit: $t11_2_out"
+  t11_passed=false
+fi
+
+# --- Part 3: down and status across all numbered instances ---
+echo "  - Part 3: Testing down and status across all numbered instances..."
+cat << 'EOF' > "${MOCK_TMP}/mock_docker_ps_containers.txt"
+gh-runner-MyLinuxPool
+gh-runner-MyLinuxPool-1
+gh-runner-MyLinuxPool-2
+gh-runner-MyLinuxPool-3
+gh-runner-MyLinuxPoolExtra-1
+EOF
+
+rm -f "${MOCK_TMP}/docker_calls.log"
+
+set +e
+t11_3_down_out=$("${GH_RUNNER_SCRIPT}" down MyLinuxPool 2>&1)
+t11_3_down_exit=$?
+set -e
+
+if [ $t11_3_down_exit -eq 0 ]; then
+  if grep -E -q "rm -f gh-runner-MyLinuxPool( |$)" "${MOCK_TMP}/docker_calls.log" && \
+     grep -E -q "rm -f gh-runner-MyLinuxPool-1( |$)" "${MOCK_TMP}/docker_calls.log" && \
+     grep -E -q "rm -f gh-runner-MyLinuxPool-2( |$)" "${MOCK_TMP}/docker_calls.log" && \
+     grep -E -q "rm -f gh-runner-MyLinuxPool-3( |$)" "${MOCK_TMP}/docker_calls.log"; then
+    echo "    * down successfully stopped legacy unnumbered and all numbered containers (1, 2, 3)."
+  else
+    fail "T11.3: down did not stop all target containers! Calls log: $(cat "${MOCK_TMP}/docker_calls.log")"
+    t11_passed=false
+  fi
+
+  if grep -q "gh-runner-MyLinuxPoolExtra-1" "${MOCK_TMP}/docker_calls.log"; then
+    fail "T11.3: down unexpectedly removed gh-runner-MyLinuxPoolExtra-1!"
+    t11_passed=false
+  else
+    echo "    * down preserved unrelated container gh-runner-MyLinuxPoolExtra-1."
+  fi
+else
+  fail "T11.3: down MyLinuxPool failed with code $t11_3_down_exit: $t11_3_down_out"
+  t11_passed=false
+fi
+
+# Test status filters
+rm -f "${MOCK_TMP}/docker_calls.log"
+set +e
+t11_3_status_out=$("${GH_RUNNER_SCRIPT}" status MyLinuxPool 2>&1)
+t11_3_status_exit=$?
+set -e
+
+if [ $t11_3_status_exit -eq 0 ]; then
+  ps_call=$(grep "docker ps" "${MOCK_TMP}/docker_calls.log" || true)
+  if echo "${ps_call}" | grep -F -q -- "--filter name=^/gh-runner-MyLinuxPool$" && \
+     echo "${ps_call}" | grep -F -q -- "--filter name=^/gh-runner-MyLinuxPool-"; then
+    echo "    * status correctly passed regex name filters for unnumbered and numbered containers."
+  else
+    fail "T11.3: status did not pass expected filter arguments: ${ps_call}"
+    t11_passed=false
+  fi
+else
+  fail "T11.3: status MyLinuxPool failed with code $t11_3_status_exit: $t11_3_status_out"
+  t11_passed=false
+fi
+
+# --- Part 4: Invalid count values (0, -1, abc) ---
+echo "  - Part 4: Testing invalid count values..."
+for invalid_count in "0" "-1" "abc"; do
+  rm -f "${MOCK_TMP}/docker_run_calls.log"
+  set +e
+  t11_4_out=$(GH_RUNNER_TOKEN_FILE="${FAKE_TOKEN_FILE}" \
+             GH_MOCK_MODE="private" \
+             "${GH_RUNNER_SCRIPT}" up --count "${invalid_count}" MyLinuxPool 2>&1)
+  t11_4_exit=$?
+  set -e
+
+  if [ $t11_4_exit -ne 0 ]; then
+    if [ ! -f "${MOCK_TMP}/docker_run_calls.log" ]; then
+      echo "    * Invalid count '${invalid_count}' rejected before running docker."
+    else
+      fail "T11.4: docker run was executed despite invalid count '${invalid_count}'!"
+      t11_passed=false
+    fi
+  else
+    fail "T11.4: Invalid count '${invalid_count}' unexpectedly exited with 0!"
+    t11_passed=false
+  fi
+done
+
+# Clean up mock state file after T11
+rm -f "${MOCK_TMP}/mock_docker_ps_containers.txt"
+
+if [ "$t11_passed" = true ]; then
+  pass "T11: Multi-runner count, legacy migration, scaling down, resource limits, and input validation verified."
 fi
 
 echo ""
