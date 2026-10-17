@@ -6,20 +6,20 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 IMAGE_NAME="${GH_RUNNER_IMAGE:-mlp-gh-runner:latest}"
-DEFAULT_REPOS="MyPMO MyBrain MyAiEntry"
+DEFAULT_REPOS="MyPMO MyBrain MyAiEntry MyLinuxPool"
 DEFAULT_OWNER="FATESAIKOU"
 DEFAULT_LABELS="fh-runner"
 
 usage() {
   cat << 'EOF'
 Usage:
-  gh-runner.sh up [--build] [repo...]
+  gh-runner.sh up [--build] [--repo repo...] [repo...]
       Start runner container(s) for specified repository/repositories.
       If --build is passed, rebuilds the runner Docker image first.
-      If no repo specified, defaults to $GH_RUNNER_REPOS ("MyPMO MyBrain MyAiEntry").
-  gh-runner.sh down [repo...]
+      If no repo specified, defaults to $GH_RUNNER_REPOS ("MyPMO MyBrain MyAiEntry MyLinuxPool").
+  gh-runner.sh down [--repo repo...] [repo...]
       Stop and remove runner container(s) for specified repository/repositories.
-  gh-runner.sh status [repo...]
+  gh-runner.sh status [--repo repo...] [repo...]
       Show status of gh-runner container(s).
   gh-runner.sh build
       Build the runner Docker image.
@@ -28,7 +28,7 @@ Usage:
 
 Environment Variables:
   GH_RUNNER_TOKEN_FILE   Path to PAT file (default: ~/.config/gh-runner/token)
-  GH_RUNNER_REPOS        Default repositories (default: "MyPMO MyBrain MyAiEntry")
+  GH_RUNNER_REPOS        Default repositories (default: "MyPMO MyBrain MyAiEntry MyLinuxPool")
   GH_RUNNER_OWNER        Default owner/organization (default: "FATESAIKOU")
   GH_RUNNER_LABELS       Runner labels (default: "fh-runner")
   GH_RUNNER_IMAGE        Runner image tag (default: "mlp-gh-runner:latest")
@@ -124,12 +124,29 @@ cmd_build() {
 
 cmd_up() {
   local force_build=false
-  if [ $# -gt 0 ] && [ "$1" = "--build" ]; then
-    force_build=true
-    shift
-  fi
+  local raw_repos=()
 
-  local raw_repos=("$@")
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --build)
+        force_build=true
+        ;;
+      --repo)
+        shift
+        if [ $# -gt 0 ]; then
+          raw_repos+=("$1")
+        fi
+        ;;
+      --repo=*)
+        raw_repos+=("${1#--repo=}")
+        ;;
+      *)
+        raw_repos+=("$1")
+        ;;
+    esac
+    shift
+  done
+
   if [ ${#raw_repos[@]} -eq 0 ]; then
     # Read from env GH_RUNNER_REPOS or default
     read -r -a raw_repos <<< "${GH_RUNNER_REPOS:-$DEFAULT_REPOS}"
@@ -208,7 +225,25 @@ cmd_up() {
 }
 
 cmd_down() {
-  local raw_repos=("$@")
+  local raw_repos=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --repo)
+        shift
+        if [ $# -gt 0 ]; then
+          raw_repos+=("$1")
+        fi
+        ;;
+      --repo=*)
+        raw_repos+=("${1#--repo=}")
+        ;;
+      *)
+        raw_repos+=("$1")
+        ;;
+    esac
+    shift
+  done
+
   if [ ${#raw_repos[@]} -eq 0 ]; then
     read -r -a raw_repos <<< "${GH_RUNNER_REPOS:-$DEFAULT_REPOS}"
   fi
@@ -225,7 +260,30 @@ cmd_down() {
 }
 
 cmd_status() {
-  echo "==> Listing gh-runner containers:"
+  local raw_repos=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --repo)
+        shift
+        if [ $# -gt 0 ]; then
+          raw_repos+=("$1")
+        fi
+        ;;
+      --repo=*)
+        raw_repos+=("${1#--repo=}")
+        ;;
+      *)
+        raw_repos+=("$1")
+        ;;
+    esac
+    shift
+  done
+
+  if [ ${#raw_repos[@]} -eq 0 ]; then
+    read -r -a raw_repos <<< "${GH_RUNNER_REPOS:-$DEFAULT_REPOS}"
+  fi
+
+  echo "==> Listing gh-runner containers for: ${raw_repos[*]}"
   docker ps -a --filter "name=^/gh-runner-"
 }
 
