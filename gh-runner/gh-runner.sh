@@ -45,6 +45,11 @@ get_abs_path() {
   fi
 }
 
+get_file_perm() {
+  local f="$1"
+  stat -c '%a' "$f" 2>/dev/null || stat -f '%Lp' "$f" 2>/dev/null || true
+}
+
 validate_token_file() {
   local tf="$1"
   if [[ "$tf" == *"LLMGateway"* ]]; then
@@ -63,6 +68,16 @@ validate_token_file() {
     echo "Security error: Resolved token file path cannot contain 'LLMGateway': $abs_tf" >&2
     exit 1
   fi
+
+  local perm
+  perm="$(get_file_perm "$abs_tf")"
+  if [[ ! "$perm" =~ ^[0-7]{3,4}$ ]] || [ $(( 8#${perm} & 8#077 )) -ne 0 ]; then
+    echo "Security error: Token file '$abs_tf' has overly permissive or invalid permissions (${perm:-unknown})." >&2
+    echo "Group and other permissions must be 0 to protect credentials." >&2
+    echo "Please execute: chmod 600 $abs_tf" >&2
+    exit 1
+  fi
+
   printf '%s\n' "$abs_tf"
 }
 
@@ -101,8 +116,10 @@ check_repo_private() {
 }
 
 cmd_build() {
-  echo "Building runner Docker image: ${IMAGE_NAME}..."
-  docker build -t "${IMAGE_NAME}" "${SCRIPT_DIR}"
+  local host_uid
+  host_uid="$(id -u)"
+  echo "Building runner Docker image: ${IMAGE_NAME} (RUNNER_UID=${host_uid})..."
+  docker build --build-arg "RUNNER_UID=${host_uid}" -t "${IMAGE_NAME}" "${SCRIPT_DIR}"
 }
 
 cmd_up() {

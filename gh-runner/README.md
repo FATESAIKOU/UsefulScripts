@@ -11,7 +11,7 @@ GitHub Actions Self-Hosted Runner 容器化工具，專為一人公司的 Privat
 - **宿主機與容器邊界保護**：
   - 嚴禁掛載 `/var/run/docker.sock`（防止 container breakout）。
   - 嚴禁 `--privileged`，預設啟用 `--cap-drop ALL` 與 `--security-opt no-new-privileges:true`。
-  - 容器內以非 root 使用者 `runner`（UID 1001）執行工作。
+  - 容器內以非 root 使用者 `runner` 執行工作，建置時透過 `--build-arg RUNNER_UID=$(id -u)` 自動對齊主機使用者 UID，並妥善處理 Ubuntu 24.04 既有 UID 衝突，確保掛載權限一致且安全。
   - 硬性保護特定路徑，阻擋任何包含 `LLMGateway` 關鍵字的路徑，防止誤觸機密。
 
 ---
@@ -36,6 +36,8 @@ Runner 需要一個具備儲存庫管理權限的 Fine-grained Personal Access T
    echo "ghp_your_fine_grained_token_here" > ~/.config/gh-runner/token
    chmod 600 ~/.config/gh-runner/token
    ```
+   > [!IMPORTANT]
+   > `gh-runner.sh` 在執行時會強制檢查密碼檔權限。若群組或其他使用者具有任何存取權限（非 `0600` / `0400` 等），腳本將直接拒絕執行並提示 `chmod 600`，杜絕權限過寬導致的憑證洩漏。
 
 ---
 
@@ -108,6 +110,7 @@ jobs:
 - **Node.js 24**：內建 `node`, `npm`, `npx`（滿足 `MyAiEntry`）。
 - **GitHub CLI (`gh`)**：官方最新版本（滿足 `MyPMO` issue/PR 操作）。
 - **Actions Tool Cache**：已預先建立 `/opt/hostedtoolcache` 目錄架構及 `.complete` 標記。當 workflow 使用 `actions/setup-python@v6` (`python-version: '3.12'`) 或 `actions/setup-node@v4` (`node-version: 24`) 時，會直接命中本機快取，省去每次下載時間。
+- **GitHub Actions Runner**：採用官方最新穩定版本 `2.338.0`。
 - **基礎系統工具**：`git`, `jq`, `curl`, `ca-certificates`, `tar`, `gzip`, `unzip`。
 
 ---
@@ -116,7 +119,7 @@ jobs:
 
 1. **Private 專屬**：公共儲存庫執行 self-hosted runner 會引發來自外部 fork PR 的惡意程式碼執行風險。因此本工具採取白名單原則，強制執行 API 檢查，非 private 絕不啟動。
 2. **無 Docker Socket 掛載**：Runner 內部無法直接操作宿主機 Docker daemon，避免利用容器逃逸取得宿主機 root 權限。
-3. **無 Root 權限**：Runner 以非特權帳號 `runner`（UID 1001）執行，且啟用 `--cap-drop ALL` 和 `--security-opt no-new-privileges:true`。
+3. **無 Root 權限與主機 UID 自動對齊**：Runner 以非特權帳號 `runner` 執行，透過 `--build-arg RUNNER_UID=$(id -u)` 動態對齊宿主機使用者 UID（自動相容主機 UID 1000/1002 並清除 Ubuntu 24.04 預設 uid 1000 衝突），並啟用 `--cap-drop ALL` 和 `--security-opt no-new-privileges:true`。
 4. **長期 PAT 永不進容器，單次 Token 瞬間清空**：
    - 宿主機 `gh-runner.sh` 使用 PAT 透過 `curl --config -`（由 stdin 傳遞 Authorization header）向 GitHub API 換取單次 registration token，長期 PAT 絕不上 `docker run` 命令列、不進環境變數、不掛載入容器。
    - 單次 registration token 存入宿主機權限 `0600` 暫存檔，掛載至容器 `/run/secrets/gh_runner_reg_token`。

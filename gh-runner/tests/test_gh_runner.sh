@@ -522,6 +522,200 @@ else
   fail "T7: One or more subcommands failed (help:$help_exit status:$status_exit down:$down_exit)"
 fi
 
+# -----------------------------------------------------------------
+# T8: Token File Permission Check (0600 enforcement & chmod 600 prompt)
+# -----------------------------------------------------------------
+echo ""
+echo "--- Running T8: Token File Permission Check ---"
+t8_passed=true
+PERM_TEST_TOKEN="${MOCK_TMP}/perm_test_token"
+echo "ghp_PERM_TEST_SECRET_TOKEN" > "${PERM_TEST_TOKEN}"
+
+for bad_perm in 0664 0640 0604; do
+  chmod "$bad_perm" "${PERM_TEST_TOKEN}"
+  rm -f "${MOCK_TMP}/docker_calls.log" "${MOCK_TMP}/docker_run_calls.log"
+
+  set +e
+  perm_out=$(GH_RUNNER_TOKEN_FILE="${PERM_TEST_TOKEN}" \
+             GH_MOCK_MODE="private" \
+             "${GH_RUNNER_SCRIPT}" up MyPMO 2>&1)
+  perm_exit=$?
+  set -e
+
+  if [ $perm_exit -ne 0 ]; then
+    if [ ! -f "${MOCK_TMP}/docker_run_calls.log" ]; then
+      if echo "${perm_out}" | grep -q "chmod 600"; then
+        echo "  - Permission $bad_perm rejected, container not started, prompt 'chmod 600' present."
+      else
+        fail "T8: Permission $bad_perm rejected but error output did not prompt 'chmod 600': $perm_out"
+        t8_passed=false
+      fi
+    else
+      fail "T8: docker run was unexpectedly executed for token with permission $bad_perm!"
+      t8_passed=false
+    fi
+  else
+    fail "T8: Expected non-zero exit code for token with permission $bad_perm, but got 0!"
+    t8_passed=false
+  fi
+done
+
+# Also test valid permission (0600)
+chmod 0600 "${PERM_TEST_TOKEN}"
+rm -f "${MOCK_TMP}/docker_calls.log" "${MOCK_TMP}/docker_run_calls.log"
+set +e
+valid_perm_out=$(GH_RUNNER_TOKEN_FILE="${PERM_TEST_TOKEN}" \
+                 GH_MOCK_MODE="private" \
+                 "${GH_RUNNER_SCRIPT}" up MyPMO 2>&1)
+valid_perm_exit=$?
+set -e
+if [ $valid_perm_exit -eq 0 ] && [ -f "${MOCK_TMP}/docker_run_calls.log" ]; then
+  echo "  - Permission 0600 accepted and container started."
+else
+  fail "T8: Permission 0600 unexpectedly failed: $valid_perm_out"
+  t8_passed=false
+fi
+
+# Simulate Linux GNU stat behavior (where -f is --file-system and prints to stdout + exit 1)
+echo "  - Testing with simulated Linux GNU stat..."
+GNU_STAT_DIR="${MOCK_TMP}/gnu_stat_bin"
+mkdir -p "${GNU_STAT_DIR}"
+cat << 'EOF' > "${GNU_STAT_DIR}/stat"
+#!/usr/bin/env bash
+if [ "${1:-}" = "-f" ]; then
+  # Linux GNU stat: -f is --file-system, writes filesystem metadata to stdout and fails with exit 1 on '%Lp'
+  echo "  File: \"$2\""
+  echo "    ID: 100000000 Namelen: 255     Type: ext2/ext3"
+  echo "Block size: 4096       Fundamental block size: 4096"
+  exit 1
+fi
+
+if [ "${1:-}" = "-c" ] && [ "${2:-}" = "%a" ]; then
+  target="${3:-}"
+  /usr/bin/stat -f '%Lp' "$target" 2>/dev/null || python3 -c "import os, sys; print(oct(os.stat(sys.argv[1]).st_mode & 0o777)[2:])" "$target"
+  exit 0
+fi
+
+/usr/bin/stat "$@"
+EOF
+chmod 0755 "${GNU_STAT_DIR}/stat"
+
+# Test 0600 under simulated Linux GNU stat
+chmod 0600 "${PERM_TEST_TOKEN}"
+rm -f "${MOCK_TMP}/docker_calls.log" "${MOCK_TMP}/docker_run_calls.log"
+set +e
+gnu_stat_out=$(PATH="${GNU_STAT_DIR}:${PATH}" \
+               GH_RUNNER_TOKEN_FILE="${PERM_TEST_TOKEN}" \
+               GH_MOCK_MODE="private" \
+               "${GH_RUNNER_SCRIPT}" up MyPMO 2>&1)
+gnu_stat_exit=$?
+set -e
+
+if [ $gnu_stat_exit -eq 0 ] && [ -f "${MOCK_TMP}/docker_run_calls.log" ]; then
+  echo "  - Simulated Linux GNU stat: 0600 token successfully verified without invoking stat -f."
+else
+  fail "T8: Simulated Linux GNU stat failed for 0600 token: $gnu_stat_out"
+  t8_passed=false
+fi
+
+# Test 0664 under simulated Linux GNU stat (must reject with chmod 600 without bash arithmetic error)
+chmod 0664 "${PERM_TEST_TOKEN}"
+rm -f "${MOCK_TMP}/docker_calls.log" "${MOCK_TMP}/docker_run_calls.log"
+set +e
+gnu_bad_perm_out=$(PATH="${GNU_STAT_DIR}:${PATH}" \
+                   GH_RUNNER_TOKEN_FILE="${PERM_TEST_TOKEN}" \
+                   GH_MOCK_MODE="private" \
+                   "${GH_RUNNER_SCRIPT}" up MyPMO 2>&1)
+gnu_bad_perm_exit=$?
+set -e
+
+if [ $gnu_bad_perm_exit -ne 0 ]; then
+  if [ ! -f "${MOCK_TMP}/docker_run_calls.log" ] && echo "${gnu_bad_perm_out}" | grep -q "chmod 600"; then
+    echo "  - Simulated Linux GNU stat: 0664 token correctly rejected with chmod 600 prompt and without crashing."
+  else
+    fail "T8: Simulated Linux GNU stat 0664 check failed or ran docker: $gnu_bad_perm_out"
+    t8_passed=false
+  fi
+else
+  fail "T8: Simulated Linux GNU stat unexpectedly allowed 0664 token!"
+  t8_passed=false
+fi
+
+if [ "$t8_passed" = true ]; then
+  pass "T8: Token file permission check strictly enforced (rejected 0664/0640/0604 with chmod 600 prompt, accepted 0600, verified under simulated Linux GNU stat)."
+fi
+
+# -----------------------------------------------------------------
+# T9: Host UID Alignment & Runner Version Check
+# -----------------------------------------------------------------
+echo ""
+echo "--- Running T9: Host UID Alignment & Runner Version Check ---"
+t9_passed=true
+current_uid="$(id -u)"
+
+rm -f "${MOCK_TMP}/docker_calls.log"
+set +e
+build_out=$("${GH_RUNNER_SCRIPT}" build 2>&1)
+build_exit=$?
+set -e
+
+if [ $build_exit -eq 0 ] && [ -f "${MOCK_TMP}/docker_calls.log" ]; then
+  docker_build_call="$(grep "build" "${MOCK_TMP}/docker_calls.log" | tail -n 1)"
+  if echo "${docker_build_call}" | grep -q -- "--build-arg RUNNER_UID=${current_uid}"; then
+    echo "  - docker build received --build-arg RUNNER_UID=${current_uid}."
+  else
+    fail "T9: docker build did not receive expected --build-arg RUNNER_UID=${current_uid}: ${docker_build_call}"
+    t9_passed=false
+  fi
+else
+  fail "T9: gh-runner.sh build failed: $build_out"
+  t9_passed=false
+fi
+
+# Static audit of Dockerfile for UID alignment and Runner version
+if [ -f "${DOCKERFILE}" ]; then
+  df_content="$(cat "${DOCKERFILE}")"
+
+  # 1. RUNNER_VERSION=2.338.0
+  if echo "${df_content}" | grep -q "ARG RUNNER_VERSION=2.338.0"; then
+    echo "  - Dockerfile contains ARG RUNNER_VERSION=2.338.0."
+  else
+    fail "T9: Dockerfile missing ARG RUNNER_VERSION=2.338.0!"
+    t9_passed=false
+  fi
+
+  # 2. ARG RUNNER_UID=1001
+  if echo "${df_content}" | grep -q "ARG RUNNER_UID=1001"; then
+    echo "  - Dockerfile contains ARG RUNNER_UID=1001."
+  else
+    fail "T9: Dockerfile missing ARG RUNNER_UID=1001!"
+    t9_passed=false
+  fi
+
+  # 3. getent passwd and userdel for Ubuntu 24.04 uid 1000 conflict resolution
+  if echo "${df_content}" | grep -q "getent passwd" && echo "${df_content}" | grep -q "userdel"; then
+    echo "  - Dockerfile handles existing UID cleanup (getent passwd + userdel)."
+  else
+    fail "T9: Dockerfile missing getent passwd / userdel cleanup logic!"
+    t9_passed=false
+  fi
+
+  # 4. useradd with RUNNER_UID
+  if echo "${df_content}" | grep -q 'useradd -m -u "${RUNNER_UID}"'; then
+    echo "  - Dockerfile creates runner user with \${RUNNER_UID}."
+  else
+    fail "T9: Dockerfile missing useradd -m -u \"\${RUNNER_UID}\"!"
+    t9_passed=false
+  fi
+else
+  fail "T9: Dockerfile not found!"
+  t9_passed=false
+fi
+
+if [ "$t9_passed" = true ]; then
+  pass "T9: Host UID alignment passed to docker build and Dockerfile contains version 2.338.0 and UID conflict resolution."
+fi
+
 echo ""
 echo "=========================================================="
 echo " Test Summary: ${PASSED_COUNT} passed, ${FAILED_COUNT} failed."
