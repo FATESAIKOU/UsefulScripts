@@ -509,6 +509,7 @@ if [ -f "${DOCKERFILE}" ]; then
      echo "${df_content}" | grep -q "fzf" && \
      echo "${df_content}" | grep -q "openssl" && \
      echo "${df_content}" | grep -q "rsync" && \
+     echo "${df_content}" | grep -q "tmux" && \
      echo "${df_content}" | grep -q "linode-cli" && \
      echo "${df_content}" | grep -q "USER runner"; then
     echo "  - Dockerfile contains python3, gh, node, /opt/hostedtoolcache, PIP settings, MyLinuxPool dependencies, and unprivileged runner user."
