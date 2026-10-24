@@ -140,12 +140,12 @@ jobs:
 | **`MyPMO`** | `validate.yml`, `sync.yml` | `python3` (3.12), `python3-pip`, `python3-yaml`, `gh`, `git`, `bash`, `jq`, `curl` |
 | **`MyBrain`** | `okf-check.yml` | `python3` (3.12), `python3-pip`, `PyYAML>=6`, `actions/setup-python@v6` toolcache |
 | **`MyAiEntry`** | `ci.yml` | Node.js 24 (`node`, `npm`, `npx`), `actions/setup-node@v4` toolcache |
-| **`MyLinuxPool`** | `ci.yml`, `create-worker.yml`, `delete-worker.yml`, `refresh-authorized-keys.yml`, `repair-gateway.yml`, `rotate-gateway.yml`, `.github/actions/pool-ssh`, `.github/actions/push-state`, `linode/action-linode-cli@v1` | `openssh-client` (`ssh`, `scp`, `ssh-agent`, `ssh-add`, `ssh-keygen`), `python3-pytest` (單元測試), `gettext-base` (`envsubst` 設定檔渲染), `fzf` (`mlp` CLI 必要依賴), `openssl` (金鑰與加密操作), `rsync` (客戶端同步測試), `linode-cli` (Linode 管理 CLI), `pyyaml`, `jsonschema`, `gh`, `git`, `jq`, `curl`, `bash` |
+| **`MyLinuxPool`** | `ci.yml`, `create-worker.yml`, `delete-worker.yml`, `refresh-authorized-keys.yml`, `repair-gateway.yml`, `rotate-gateway.yml`, `.github/actions/pool-ssh`, `.github/actions/push-state`, `linode/action-linode-cli@v1` | `openssh-client` (`ssh`, `scp`, `ssh-agent`, `ssh-add`, `ssh-keygen`), `python3-pytest` (單元測試), `gettext-base` (`envsubst` 設定檔渲染), `fzf` (`mlp` CLI 必要依賴), `openssl` (金鑰與加密操作), `rsync` (客戶端同步測試), `tmux` (終端多工，供 workflow 內的 session 使用), `linode-cli` (Linode 管理 CLI), `pyyaml`, `jsonschema`, `gh`, `git`, `jq`, `curl`, `bash` |
 
 ### 內建執行環境與 Tool Cache
 容器映像檔預裝以下工具以完全相容各 repo 的 workflow：
 - **系統基礎工具**：`git`, `jq`, `curl`, `ca-certificates`, `tar`, `gzip`, `unzip`, `gnupg`。
-- **SSH 與維運套件**：`openssh-client` (`ssh`, `scp`, `ssh-agent`, `ssh-add`, `ssh-keygen`), `rsync`, `openssl`, `gettext-base` (`envsubst`), `fzf`。
+- **SSH 與維運套件**：`openssh-client` (`ssh`, `scp`, `ssh-agent`, `ssh-add`, `ssh-keygen`), `rsync`, `openssl`, `gettext-base` (`envsubst`), `fzf`, `tmux`。
 - **Python 3.12 環境**：內建 `python3`, `pip`, `venv`, `python3-yaml`, `python3-pytest`，並以 pip 預裝 `pyyaml`, `jsonschema`, `linode-cli`。
 - **Pip 非特權執行環境**：設定 `PIP_BREAK_SYSTEM_PACKAGES=1`、`PIP_USER=1` 及 `PATH="/home/runner/.local/bin:${PATH}"`，當 `linode/action-linode-cli@v1` 或其他 workflow step 於 runtime 執行 `pip install` 時，自動安裝至使用者目錄且可直接在 PATH 執行。
 - **Node.js 24**：內建 `node`, `npm`, `npx`（滿足 `MyAiEntry`）。

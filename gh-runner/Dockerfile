@@ -28,6 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fzf \
     openssl \
     rsync \
+    tmux \
     && rm -rf /var/lib/apt/lists/*
 
 # Install PyYAML, jsonschema, and linode-cli via pip for workflow requirements
