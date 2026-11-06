@@ -1,3 +1,8 @@
+> **⚠️ 已停用（2026-11-07 起）**
+>
+> 所有 repo 的 self-hosted runner 改由 MyLinuxPool 的 ghrunner（`pool-ghrunner-listener`，scale set `fh-runner`）提供。
+> 本目錄保留作參考，不再維護，請不要再用來起 runner。
+
 # gh-runner
 
 GitHub Actions Self-Hosted Runner 容器化工具，專為一人公司的 Private 儲存庫（`MyPMO`、`MyBrain`、`MyAiEntry`、`MyLinuxPool`）提供輕量、安全且隔離的背景執行環境。
