@@ -80,6 +80,7 @@ export DISPLAY=":99"
 RDIR="/tmp/mlprec"
 OUTMP4="$RDIR/out.mp4"
 mkdir -p "$RDIR"
+rm -f "$OUTMP4"
 
 ZID="$(printf '%s' "${ZID_B64:?}" | base64 -d)"
 ZPW="$(printf '%s' "${ZPW_B64:?}" | base64 -d)"
@@ -94,6 +95,8 @@ CROP_H=$((RES_H - CROP_Y))
 export RES_W RES_H
 
 log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*" >&2; }
+# in-meeting toolbar evidence; one definition for INMEETING and the ENDED guard
+TOOLBAR_RE="participants|leave meeting"
 die() { log "FATAL: $*"; exit 1; }
 shot() {
     local f="$RDIR/step_$1.png" out rc
@@ -167,10 +170,11 @@ dismiss_nag() {
             break
         fi
     done
-    # 2b. TSV often misses "Got it"; gate on a cropped OCR of the toast and
+    # 2b. TSV often misses "Got it"; gate on a cropped OCR of the toast (only
+    # the button text: "my notes"/"zoom ai" also appear in the AI panel) and
     # click the button at both known rows (toolbar shown: 318, hidden: 270)
     t="$(ocr_crop 1420 140 500 240)"
-    if printf '%s' "$t" | grep -q -E "my notes|zoom ai|got it"; then
+    if printf '%s' "$t" | grep -q -E "got it"; then
         log "clicking AI toast Got it ..."
         for y in 270 318; do
             DISPLAY=:99 xdotool mousemove 1731 $y click 1 2>/dev/null
@@ -208,33 +212,39 @@ page_state() {
     printf '%s' "$txt" > "$RDIR/state.txt"
     if printf '%s' "$txt" | grep -q -E "let them know|waiting room|host will let you in"; then echo WAITING; return; fi
     if printf '%s' "$txt" | grep -q -E "has ended|has been ended|meeting ended|ended by host|host has ended|been removed|removed from the meeting|you left the meeting" \
-        && ! printf '%s' "$txt" | grep -q -i -E "participants"; then echo ENDED; return; fi
+        && ! printf '%s' "$txt" | grep -q -i -E "$TOOLBAR_RE"; then echo ENDED; return; fi
     # (ENDED needs the toolbar to be GONE too: chat or a shared screen saying
     # "has ended" must not stop a live recording.)
     if printf '%s' "$txt" | grep -q -E "link is invalid|invalid meeting|not found|does not exist|no longer available|meeting is over"; then echo INVALID; return; fi
     if printf '%s' "$txt" | grep -q -E "enter meeting info|meeting passcode|your name"; then echo PREJOIN; return; fi
     # INMEETING needs POSITIVE evidence (toolbar words). Empty/truncated OCR
     # must yield UNKNOWN, never INMEETING (false admit 2026-09-22).
-    if printf '%s' "$txt" | grep -q -i -E "participants|leave meeting"; then echo INMEETING; return; fi
+    if printf '%s' "$txt" | grep -q -i -E "$TOOLBAR_RE"; then echo INMEETING; return; fi
     echo UNKNOWN
 }
 
+pulse_ok() {
+    # healthy = pactl answers AND a monitor source exists (sets MON)
+    MON=""
+    timeout 5 pactl info >/dev/null 2>&1 || return 1
+    MON="$(timeout 5 pactl list short sources 2>/dev/null | awk '/monitor/ {print $2; exit}')"
+    [[ -n "$MON" ]]
+}
 ensure_pulse() {
     # pulseaudio can hang or die mid-session (2026-11-22: monitor open failed
     # with EAGAIN, then every restart hit "Daemon startup failed" on stale
-    # runtime state). Health = pactl answers AND a monitor source exists.
+    # runtime state). One round = restart THEN verify.
     local i
+    pulse_ok && return 0
     for i in 1 2 3; do
-        if timeout 5 pactl info >/dev/null 2>&1; then
-            MON="$(timeout 5 pactl list short sources 2>/dev/null | awk '/monitor/ {print $2; exit}')"
-            [[ -n "$MON" ]] && return 0
-        fi
-        log "pulseaudio unhealthy (try $i) — restarting ..."
+        log "pulseaudio unhealthy — restart $i/3 ..."
         pulseaudio --kill 2>/dev/null; sleep 1
         pkill -9 -x pulseaudio 2>/dev/null; sleep 1
+        # Assumes a dedicated recorder box: /tmp/pulse-* of OTHER users would go too.
         rm -rf /tmp/pulse-* "${XDG_RUNTIME_DIR:-/nonexistent}/pulse" "$HOME/.config/pulse/"*-runtime 2>/dev/null
         pulseaudio -D --exit-idle-time=-1 --disallow-exit 2>&1 | head -n 2 >&2
         sleep 2
+        pulse_ok && { log "pulseaudio recovered (monitor $MON)"; return 0; }
     done
     return 1
 }
@@ -247,6 +257,25 @@ start_ffmpeg() {
     FFPID=$!
     sleep 2
     kill -0 "$FFPID" 2>/dev/null
+}
+
+leave_meeting() {
+    log "leaving meeting politely ..."
+    DISPLAY=:99 xdotool windowfocus "$CHROME_WIN" 2>/dev/null
+    DISPLAY=:99 xdotool mousemove 960 1060 2>/dev/null; sleep 2
+    DISPLAY=:99 xdotool mousemove 1875 1060 click 1 2>/dev/null; sleep 4
+    DISPLAY=:99 xdotool mousemove 1735 633 click 1 2>/dev/null; sleep 4
+}
+stop_ffmpeg() {
+    kill -INT "$FFPID" 2>/dev/null
+    for i in $(seq 1 20); do kill -0 "$FFPID" 2>/dev/null || break; sleep 1; done
+    kill -TERM "$FFPID" 2>/dev/null
+}
+on_exit() {
+    # any exit after chrome launch (die included) must not leave the bot in
+    # the meeting or ffmpeg running
+    if [[ -n "${FFPID:-}" ]] && kill -0 "$FFPID" 2>/dev/null; then stop_ffmpeg; fi
+    pkill -x chrome 2>/dev/null
 }
 
 # ---- 1. provision (idempotent; safe on fresh default workers) ----
@@ -326,6 +355,7 @@ setInterval(mlpSweep, 2000);
 mlpSweep();
 EXT_EOF
 setsid bash -c 'DISPLAY=:99 google-chrome --no-sandbox --disable-dev-shm-usage --no-first-run --no-default-browser-check --use-angle=swiftshader --enable-unsafe-swiftshader --autoplay-policy=no-user-gesture-required --window-size=${RES_W},${RES_H} --window-position=0,0 --load-extension="$0/toastext" --user-data-dir="$0/chrome-prof" "https://app.zoom.us/wc/$1/join"' "$RDIR" "$ZID" </dev/null >"$RDIR/chrome.log" 2>&1 &
+trap on_exit EXIT
 CHROME_WIN=""
 for i in $(seq 1 30); do
     CHROME_WIN="$(DISPLAY=:99 xdotool search --onlyvisible --class google-chrome 2>/dev/null | head -n1)"
@@ -429,19 +459,6 @@ if ! start_ffmpeg; then
 fi
 log "ffmpeg pid $FFPID recording"
 
-leave_meeting() {
-    log "leaving meeting politely ..."
-    DISPLAY=:99 xdotool windowfocus "$CHROME_WIN" 2>/dev/null
-    DISPLAY=:99 xdotool mousemove 960 1060 2>/dev/null; sleep 2
-    DISPLAY=:99 xdotool mousemove 1875 1060 click 1 2>/dev/null; sleep 4
-    DISPLAY=:99 xdotool mousemove 1735 633 click 1 2>/dev/null; sleep 4
-}
-stop_ffmpeg() {
-    kill -INT "$FFPID" 2>/dev/null
-    for i in $(seq 1 20); do kill -0 "$FFPID" 2>/dev/null || break; sleep 1; done
-    kill -TERM "$FFPID" 2>/dev/null
-}
-
 if [[ "$TEST_SECS" -gt 0 ]]; then
     log "test mode: recording ${TEST_SECS}s ..."
     if [[ "$TEST_SECS" -gt 12 ]]; then
@@ -457,12 +474,12 @@ else
     sleep 12
     dismiss_nag
     START=$(date +%s)
-    MISS=0; QUIET=0; OCR_TICK=0
+    MISS=0; QUIET=0; OCR_TICK=0; ABNORMAL=""
     while true; do
         sleep 5
         NOW=$(date +%s)
         [[ $((NOW - START)) -ge "$MAX_REC_SEC" ]] && { log "max rec cap reached"; break; }
-        kill -0 "$FFPID" 2>/dev/null || { tail -n 5 "$RDIR/ffmpeg.log" >&2; log "ffmpeg exited unexpectedly -> stop"; break; }
+        kill -0 "$FFPID" 2>/dev/null || { tail -n 5 "$RDIR/ffmpeg.log" >&2; ABNORMAL="ffmpeg exited unexpectedly"; break; }
         # Window presence only: the title differs per meeting type (PMI shows
         # "<name>'s Personal Meeting Room"; 2026-11-22 false "ended" every 20s).
         # Meeting end is decided by OCR (ENDED) below.
@@ -471,7 +488,7 @@ else
         [[ "$MISS" -ge 3 ]] && { log "meeting window gone -> ended"; break; }
         N="$(streams)"
         if [[ "$N" -ge 1 ]]; then QUIET=0; else QUIET=$((QUIET + 1)); fi
-        [[ "$QUIET" -ge 24 ]] && { log "no audio 120s (disconnected?) -> stop"; break; }
+        [[ "$QUIET" -ge 24 ]] && { ABNORMAL="no audio 120s (disconnected?)"; break; }
         OCR_TICK=$((OCR_TICK + 5))
         if [[ "$OCR_TICK" -ge 60 ]]; then
             OCR_TICK=0
@@ -492,7 +509,13 @@ shot end
 # ---- 7. verify + cleanup ----
 pkill -x chrome 2>/dev/null
 [[ -s "$OUTMP4" ]] || die "no output mp4 produced"
+# non-empty is not enough: a killed ffmpeg leaves an mp4 without moov atom
+DUR="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$OUTMP4" 2>/dev/null)"
+[[ "$DUR" =~ ^[0-9]+(\.[0-9]+)?$ ]] || die "output mp4 unreadable (no duration; ffmpeg crashed?)"
 ffprobe -hide_banner "$OUTMP4" 2>&1 | grep -E 'Duration|Stream' >&2
+# an early stop is a FAILURE (exit 1) so callers rejoin; a readable partial
+# mp4 is still kept and fetched by the controller
+[[ -z "${ABNORMAL:-}" ]] || die "recording stopped early: $ABNORMAL (partial mp4 kept, ${DUR%.*}s)"
 log "DONE $OUTMP4 ($(du -h "$OUTMP4" | cut -f1))"
 REMOTE_EOF
 echo "do_record: payload uploaded" >&2
@@ -529,7 +552,16 @@ while [[ "$ELAPSED" -lt "$WAIT_BUDGET" ]]; do
     fi
 done
 [[ "$ELAPSED" -lt "$WAIT_BUDGET" ]] || { echo "do_record: poll budget exhausted; remote may still run (check /tmp/mlprec/run.out on $DEST)" >&2; RC=1; }
-[[ "$RC" -eq 0 ]] || exit 1
+if [[ "$RC" -ne 0 ]]; then
+    # salvage a readable partial recording (run.sh deletes stale out.mp4 at start)
+    if "${SSH[@]}" -o BatchMode=yes -o ConnectTimeout=15 "$DEST" \
+        "ffprobe -v error -show_entries format=duration -of csv=p=0 /tmp/mlprec/out.mp4 2>/dev/null | grep -qE '^[0-9]'" 2>/dev/null; then
+        mkdir -p "$(dirname "$OUT")"
+        "${SCP[@]}" -o BatchMode=yes "$DEST:/tmp/mlprec/out.mp4" "$OUT" \
+            && echo "do_record: FAILED, but fetched partial mp4 -> $OUT" >&2
+    fi
+    exit 1
+fi
 
 echo "do_record: fetching mp4 -> $OUT ..." >&2
 mkdir -p "$(dirname "$OUT")"

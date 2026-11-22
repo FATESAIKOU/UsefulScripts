@@ -44,8 +44,12 @@ SSH_OPTS="-i ~/.ssh/key" do_record.sh ubuntu@1.2.3.4 ...               # 任意�
 - 散會判定（錄影中）：Chrome 視窗消失 15 秒、OCR 連兩次（間隔 10 秒）看到散會文字
   **且**工具列已消失、音訊串流 120 秒歸零、ffmpeg 意外結束、或達 `MAX_REC_SEC`。
   不看視窗標題（個人會議室的標題是 `<名字>'s Personal Meeting Room`，見 #15）。
-- pulseaudio 無回應或沒有 monitor source 時會自動清掉殘留後重啟（最多 3 次），
-  ffmpeg 啟動失敗會修好 pulse 再重試一次。
+- 提早停止（ffmpeg 中途結束、音訊 120 秒歸零）算**失敗**：remote 印 `FATAL`、
+  `do_record.sh` exit 1，讓外層可以重新入會；mp4 若還讀得到（ffprobe 有 duration）
+  照樣取回 `<outputmp4>`。mp4 讀不到（ffmpeg 被殺、沒有 moov atom）一律算失敗。
+- 入會後任何結束（含 `die`）都會停 ffmpeg、關 Chrome，bot 不會留在會議裡。
+- pulseaudio 無回應或沒有 monitor source 時會自動清掉殘留後重啟（最多 3 輪「重啟→驗證」；
+  會清 `/tmp/pulse-*`，前提是專用的錄影機），ffmpeg 啟動失敗會修好 pulse 再重試一次。
 - ⚠️ `TEST_SECS` 模式**不走**散會判定迴圈；改到散會判定時，請用
   `MAX_REC_SEC=360` 的正式模式實測。
 - 會議中的提示 toast（權限要求、AI 介紹、硬加速）由 Chrome 擴充功能
