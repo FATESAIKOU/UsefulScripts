@@ -54,6 +54,10 @@ SSH_OPTS="-i ~/.ssh/key" do_record.sh ubuntu@1.2.3.4 ...               # 任意�
   `do_record.sh` exit 1，讓外層可以重新入會；mp4 若還讀得到（ffprobe 有 duration）
   照樣取回 `<outputmp4>`。mp4 讀不到（ffmpeg 被殺、沒有 moov atom）一律算失敗。
 - 入會後任何結束（含 `die`）都會停 ffmpeg、關 Chrome，bot 不會留在會議裡。
+- 會議 ID／密碼／顯示名稱不放在 ssh 命令列或環境變數：controller 經 ssh stdin 寫進 worker 的
+  `/tmp/mlprec/secret`（0600），`run.sh` 讀完立刻刪掉；輸入密碼用 `xdotool type --file -`（stdin），
+  所以 worker 的 `ps` 也看不到。仍會出現在 `ps` 的：本機呼叫 `do_record.sh` 的參數本身，
+  以及 worker 上 Chrome 的入會網址（含會議 ID，不含密碼）。
 - 不用 `pkill`／`killall`（mlp image 會把它們換成一律失敗的 shim，見 MyLinuxPool#431）：
   一律用 `pgrep -f` 精確比對（例如 Chrome 只認 `--user-data-dir=/tmp/mlprec/chrome-prof`）再 `kill`。
   舊版因此留下過殘留的 Chrome，佔住 CDP port，也在會議裡留下殘留的連線。

@@ -80,7 +80,9 @@ echo "do_record: checking ssh to $DEST via [${SSH_OPTS_DISPLAY}] ..." >&2
 echo "do_record: uploading recorder payload to $DEST ..." >&2
 "${SSH[@]}" -o BatchMode=yes -o ConnectTimeout=15 "$DEST" 'cat > /tmp/mlprec/run.sh' <<'REMOTE_EOF'
 #!/usr/bin/env bash
-# run.sh (remote payload) — env in: ZID_B64 ZPW_B64 ZNAME_B64 TEST_SECS ADMIT_TIMEOUT_SEC MAX_REC_SEC
+# run.sh (remote payload) — env in: TEST_SECS ADMIT_TIMEOUT_SEC MAX_REC_SEC ...
+# meeting ID / passcode / name come from $RDIR/secret (0600, written via ssh
+# stdin by the controller, deleted right after reading) — never from argv/env
 set -u
 export DISPLAY=":99"
 RDIR="/tmp/mlprec"
@@ -88,9 +90,21 @@ OUTMP4="$RDIR/out.mp4"
 mkdir -p "$RDIR"
 rm -f "$OUTMP4"
 
+SECRET="$RDIR/secret"
+[[ -r "$SECRET" ]] || { echo "FATAL: $SECRET missing (controller must write it first)"; exit 1; }
+ZID_B64=""; ZPW_B64=""; ZNAME_B64=""
+while IFS= read -r line || [[ -n "$line" ]]; do
+    case "${line%%=*}" in
+        ZID_B64)   ZID_B64="${line#*=}" ;;
+        ZPW_B64)   ZPW_B64="${line#*=}" ;;
+        ZNAME_B64) ZNAME_B64="${line#*=}" ;;
+    esac
+done < "$SECRET"
+rm -f "$SECRET"
 ZID="$(printf '%s' "${ZID_B64:?}" | base64 -d)"
 ZPW="$(printf '%s' "${ZPW_B64:?}" | base64 -d)"
 ZNAME="$(printf '%s' "${ZNAME_B64:?}" | base64 -d)"
+unset ZID_B64 ZPW_B64 ZNAME_B64
 TEST_SECS="${TEST_SECS:-0}"
 ADMIT_TIMEOUT_SEC="${ADMIT_TIMEOUT_SEC:-1200}"
 MAX_REC_SEC="${MAX_REC_SEC:-21600}"
@@ -483,11 +497,11 @@ done
 DISPLAY=:99 xdotool windowfocus "$CHROME_WIN"
 DISPLAY=:99 xdotool mousemove 1355 485 click 1
 sleep 1
-DISPLAY=:99 xdotool type -- "$ZPW"
+printf '%s' "$ZPW" | DISPLAY=:99 xdotool type --file -   # stdin: keep the passcode out of argv
 sleep 1
 DISPLAY=:99 xdotool mousemove 1355 555 click 1
 sleep 1
-DISPLAY=:99 xdotool type -- "$ZNAME"
+printf '%s' "$ZNAME" | DISPLAY=:99 xdotool type --file -
 sleep 1
 shot filled
 # submit: keyboard Enter in the name field first (most reliable), then button clicks
@@ -604,10 +618,17 @@ log "DONE $OUTMP4 ($(du -h "$OUTMP4" | cut -f1))"
 REMOTE_EOF
 echo "do_record: payload uploaded" >&2
 
+echo "do_record: sending meeting credentials via ssh stdin (0600 file) ..." >&2
+# printf is a builtin, so the values never appear in any argv (local or remote)
+printf 'ZID_B64=%s\nZPW_B64=%s\nZNAME_B64=%s\n' "$ZID_B64" "$ZPW_B64" "$ZNAME_B64" \
+    | "${SSH[@]}" -o BatchMode=yes -o ConnectTimeout=15 "$DEST" \
+        'umask 077; rm -f /tmp/mlprec/secret && cat > /tmp/mlprec/secret' \
+    || { echo "do_record: sending credentials failed" >&2; exit 1; }
+
 echo "do_record: launching remote recorder on $DEST (name=$REC_NAME, detached) ..." >&2
 # shellcheck disable=SC2029
 "${SSH[@]}" -o BatchMode=yes -o ConnectTimeout=15 "$DEST" \
-    "rm -f /tmp/mlprec/run.out; ZID_B64='$ZID_B64' ZPW_B64='$ZPW_B64' ZNAME_B64='$ZNAME_B64' TEST_SECS='$TEST_SECS' ADMIT_TIMEOUT_SEC='$ADMIT_TIMEOUT_SEC' MAX_REC_SEC='$MAX_REC_SEC' ALONE_SEC='$ALONE_SEC' GONE_HITS='$GONE_HITS' RES_W='$RES_W' RES_H='$RES_H' setsid bash /tmp/mlprec/run.sh </dev/null >>/tmp/mlprec/run.out 2>&1 & echo LAUNCHED" \
+    "rm -f /tmp/mlprec/run.out; TEST_SECS='$TEST_SECS' ADMIT_TIMEOUT_SEC='$ADMIT_TIMEOUT_SEC' MAX_REC_SEC='$MAX_REC_SEC' ALONE_SEC='$ALONE_SEC' GONE_HITS='$GONE_HITS' RES_W='$RES_W' RES_H='$RES_H' setsid bash /tmp/mlprec/run.sh </dev/null >>/tmp/mlprec/run.out 2>&1 & echo LAUNCHED" \
     || { echo "do_record: remote launch failed" >&2; exit 1; }
 
 WAIT_BUDGET=$(( ADMIT_TIMEOUT_SEC + 300 ))
