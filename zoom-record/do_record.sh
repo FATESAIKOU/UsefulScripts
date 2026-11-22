@@ -19,7 +19,10 @@
 #   SSH_OPTS           extra flags for ssh/scp, e.g. "-F cfg -i key -J jump"
 #                      (no spaces inside values; key-auth required)
 #   REC_NAME           display name in meeting (default: rec-<target>)
-#   TEST_SECS          >0: record N sec after admit then leave (default 0 = till meeting ends)
+#   TEST_SECS          >0: cap recording at N sec (same stop loop as real runs; default 0)
+#   ALONE_SEC          stop after the bot has been the ONLY participant this long,
+#                      once someone else was seen (default 300)
+#   GONE_HITS          consecutive 5s probes without the meeting UI before stop (default 3)
 #   ADMIT_TIMEOUT_SEC  how long to wait in waiting room (default 1200)
 #   MAX_REC_SEC        safety cap on recording length (default 21600 = 6h)
 #   RES_W / RES_H      virtual display size (default 1920 / 1080)
@@ -27,7 +30,7 @@ set -uo pipefail
 
 usage() {
     echo "usage: $0 <target> <zoomid> <zoompw> <outputmp4>" >&2
-    echo "  <target>: [user@]host[:port]; env: SSH_OPTS REC_NAME TEST_SECS ADMIT_TIMEOUT_SEC MAX_REC_SEC RES_W RES_H" >&2
+    echo "  <target>: [user@]host[:port]; env: SSH_OPTS REC_NAME TEST_SECS ADMIT_TIMEOUT_SEC MAX_REC_SEC ALONE_SEC GONE_HITS RES_W RES_H" >&2
 }
 
 [[ $# -eq 4 ]] || { usage; exit 2; }
@@ -58,6 +61,9 @@ ADMIT_TIMEOUT_SEC="${ADMIT_TIMEOUT_SEC:-1200}"
 MAX_REC_SEC="${MAX_REC_SEC:-21600}"
 RES_W="${RES_W:-1920}"
 RES_H="${RES_H:-1080}"
+ALONE_SEC="${ALONE_SEC:-300}"
+GONE_HITS="${GONE_HITS:-3}"
+[[ "$ALONE_SEC" =~ ^[0-9]+$ && "$GONE_HITS" =~ ^[1-9][0-9]*$ ]] || { echo "do_record: ALONE_SEC/GONE_HITS must be integers" >&2; exit 2; }
 
 command -v ssh >/dev/null || { echo "do_record: ssh not found" >&2; exit 2; }
 command -v scp >/dev/null || { echo "do_record: scp not found" >&2; exit 2; }
@@ -90,6 +96,8 @@ ADMIT_TIMEOUT_SEC="${ADMIT_TIMEOUT_SEC:-1200}"
 MAX_REC_SEC="${MAX_REC_SEC:-21600}"
 RES_W="${RES_W:-1920}"
 RES_H="${RES_H:-1080}"
+ALONE_SEC="${ALONE_SEC:-300}"
+GONE_HITS="${GONE_HITS:-3}"
 CROP_Y=140
 CROP_H=$((RES_H - CROP_Y))
 export RES_W RES_H
@@ -98,6 +106,23 @@ log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*" >&2; }
 # in-meeting toolbar evidence; one definition for INMEETING and the ENDED guard
 TOOLBAR_RE="participants|leave meeting"
 die() { log "FATAL: $*"; exit 1; }
+# Kill OUR processes whose full command line matches an ERE. Never kill by bare
+# name: mlp images (MyLinuxPool#431) shim pkill/killall to always fail, which
+# silently left every old Chrome alive (and holding the CDP port) — #17.
+kill_pat() {
+    local pids
+    pids="$(pgrep -u "$(id -u)" -f -- "$1" | tr '\n' ' ')"
+    [[ -n "${pids// /}" ]] && kill -"${2:-TERM}" $pids 2>/dev/null
+    return 0
+}
+CHROME_PAT="--user-data-dir=$RDIR/chrome-prof"
+stop_chrome() {
+    local i
+    kill_pat "$CHROME_PAT"
+    for i in $(seq 1 15); do pgrep -u "$(id -u)" -f -- "$CHROME_PAT" >/dev/null || return 0; sleep 1; done
+    log "chrome ignored SIGTERM, SIGKILLing ..."
+    kill_pat "$CHROME_PAT" KILL; sleep 2
+}
 shot() {
     local f="$RDIR/step_$1.png" out rc
     rm -f "$f"
@@ -239,7 +264,7 @@ ensure_pulse() {
     for i in 1 2 3; do
         log "pulseaudio unhealthy — restart $i/3 ..."
         pulseaudio --kill 2>/dev/null; sleep 1
-        pkill -9 -x pulseaudio 2>/dev/null; sleep 1
+        kill_pat '^pulseaudio( |$)' KILL; sleep 1
         # Assumes a dedicated recorder box: /tmp/pulse-* of OTHER users would go too.
         rm -rf /tmp/pulse-* "${XDG_RUNTIME_DIR:-/nonexistent}/pulse" "$HOME/.config/pulse/"*-runtime 2>/dev/null
         pulseaudio -D --exit-idle-time=-1 --disallow-exit 2>&1 | head -n 2 >&2
@@ -261,6 +286,11 @@ start_ffmpeg() {
 
 leave_meeting() {
     log "leaving meeting politely ..."
+    if [[ "$(cdp_eval "$JS_LEAVE")" == clicked ]]; then
+        sleep 2
+        [[ "$(cdp_eval "$JS_LEAVE_CONFIRM")" == confirmed ]] && { sleep 3; return; }
+    fi
+    # fallback: coordinates (only when the DOM route failed)
     DISPLAY=:99 xdotool windowfocus "$CHROME_WIN" 2>/dev/null
     DISPLAY=:99 xdotool mousemove 960 1060 2>/dev/null; sleep 2
     DISPLAY=:99 xdotool mousemove 1875 1060 click 1 2>/dev/null; sleep 4
@@ -275,7 +305,95 @@ on_exit() {
     # any exit after chrome launch (die included) must not leave the bot in
     # the meeting or ffmpeg running
     if [[ -n "${FFPID:-}" ]] && kill -0 "$FFPID" 2>/dev/null; then stop_ffmpeg; fi
-    pkill -x chrome 2>/dev/null
+    stop_chrome
+}
+
+# ---- CDP (Chrome DevTools Protocol, 127.0.0.1:9222 on this box only) ----
+# Reading the page beats OCR/coordinates: participant count, in-meeting
+# toolbar and toasts come straight from the DOM (#17). OCR stays as fallback.
+cat > "$RDIR/cdp.py" <<'CDP_EOF'
+import json, sys, urllib.request
+try:
+    import websocket
+except ImportError:
+    sys.exit(3)
+try:
+    tabs = json.load(urllib.request.urlopen("http://127.0.0.1:9222/json", timeout=5))
+except Exception:
+    sys.exit(3)
+pages = [t for t in tabs if t.get("type") == "page" and "zoom.us" in t.get("url", "")]
+if not pages:
+    sys.exit(2)
+try:
+    ws = websocket.create_connection(pages[0]["webSocketDebuggerUrl"], timeout=10)
+    ws.send(json.dumps({"id": 1, "method": "Runtime.evaluate",
+                        "params": {"expression": sys.argv[1], "returnByValue": True}}))
+    while True:
+        msg = json.loads(ws.recv())
+        if msg.get("id") == 1:
+            break
+    ws.close()
+except Exception:
+    sys.exit(3)
+res = msg.get("result", {})
+if "exceptionDetails" in res:
+    sys.exit(3)
+v = res.get("result", {}).get("value")
+print(v if isinstance(v, str) else json.dumps(v))
+CDP_EOF
+cdp_eval() { timeout 20 python3 "$RDIR/cdp.py" "$1" 2>/dev/null; }
+# -> "IN N": IN=1 when the footer Leave button exists (present even while the
+# toolbar is visually hidden); N = participant count (incl. us) or -1.
+# exit !=0 = CDP unavailable (no tab -> 2, protocol -> 3).
+JS_PROBE='(() => { const b = [...document.querySelectorAll("button")];
+  const leave = b.some(x => (x.getAttribute("aria-label") || "").trim() === "Leave");
+  const pa = b.map(x => x.getAttribute("aria-label") || "").find(a => /participants list pane/i.test(a));
+  const m = pa && pa.match(/\[(\d+)\]/);
+  return (leave ? 1 : 0) + " " + (m ? m[1] : -1); })()'
+meeting_probe() {
+    local out rc
+    out="$(cdp_eval "$JS_PROBE")"; rc=$?
+    # no zoom tab at all = the page is gone (counts as "not in meeting")
+    [[ "$rc" -eq 2 ]] && { echo "0 -1"; return 0; }
+    [[ "$rc" -eq 0 && "$out" =~ ^[01]\ -?[0-9]+$ ]] || return 1
+    echo "$out"
+}
+# hide nag/AI/accel toasts by TEXT and press any visible "Got it" (position-proof;
+# replaces the --load-extension toast killer, which Chrome 137+ ignores)
+JS_TOASTS='(() => { const P = ["please enable access", "a new home for zoom ai",
+    "better meeting experience", "graphics/hardware acceleration"]; let k = 0;
+  const all = [...document.querySelectorAll("body *")];
+  for (const p of P) {
+    // smallest element holding the whole phrase (toast text is split by
+    // <button>microphone</button> etc., so leaf-only matching misses it) ...
+    const hits = all.filter(e => e.offsetWidth > 0 && (e.textContent || "").toLowerCase().includes(p));
+    if (!hits.length) continue;
+    let n = hits.reduce((a, b) => (b.textContent.length < a.textContent.length ? b : a));
+    // ... widened to the outermost toast-sized box (stop below full-width containers)
+    while (n.parentElement && n.parentElement !== document.body && n.parentElement.offsetWidth < 1500) n = n.parentElement;
+    if (n.offsetWidth < 1500) { n.style.setProperty("display", "none", "important"); k++; }
+  }
+  for (const x of document.querySelectorAll("button"))
+    if ((x.innerText || "").trim() === "Got it" && x.offsetParent) { x.click(); k++; }
+  return String(k); })()'
+JS_LEAVE='(() => { const l = [...document.querySelectorAll("button")].find(x => (x.getAttribute("aria-label") || "").trim() === "Leave");
+  if (!l) return "none"; l.click(); return "clicked"; })()'
+JS_LEAVE_CONFIRM='(() => { const c = [...document.querySelectorAll("button")].find(x => /^leave meeting$/i.test((x.innerText || "").trim()));
+  if (!c) return "none"; c.click(); return "confirmed"; })()'
+
+decide_stop() {
+    # Pure stop policy (#17; no I/O, unit-testable). Args:
+    #   elapsed max ff_alive win_miss quiet_ticks gone_hits alone_sec seen_others
+    # -> CONTINUE | ENDED:<why> | ABNORMAL:<why>
+    # ENDED = normal end (exit 0). ABNORMAL = early stop (FATAL, exit 1, caller rejoins).
+    local elapsed=$1 max=$2 ff=$3 wmiss=$4 quiet=$5 gone=$6 alone=$7 seen=$8
+    [[ "$ff" -eq 1 ]]            || { echo "ABNORMAL:ffmpeg exited unexpectedly"; return; }
+    [[ "$elapsed" -lt "$max" ]]  || { echo "ENDED:max rec cap reached"; return; }
+    [[ "$wmiss" -lt 3 ]]         || { echo "ENDED:browser window gone"; return; }
+    [[ "$gone" -lt "$GONE_HITS" ]] || { echo "ENDED:meeting page gone (ended by host / removed / left)"; return; }
+    if [[ "$seen" -eq 1 && "$alone" -ge "$ALONE_SEC" ]]; then echo "ENDED:only the bot left for ${ALONE_SEC}s"; return; fi
+    [[ "$quiet" -lt 24 ]]        || { echo "ABNORMAL:no audio 120s (disconnected?)"; return; }
+    echo CONTINUE
 }
 
 # ---- 1. provision (idempotent; safe on fresh default workers) ----
@@ -284,7 +402,7 @@ sudo -n true 2>/dev/null || die "need passwordless sudo on this worker"
 export DEBIAN_FRONTEND=noninteractive
 sudo dpkg --configure -a 2>&1 | tail -n 2 >&2
 sudo apt-get update 2>&1 | tail -n 1 >&2
-for p in xvfb ffmpeg pulseaudio pulseaudio-utils xdotool scrot mesa-utils curl ca-certificates tesseract-ocr; do
+for p in xvfb ffmpeg pulseaudio pulseaudio-utils xdotool scrot mesa-utils curl ca-certificates tesseract-ocr python3-websocket; do
     dpkg -s "$p" >/dev/null 2>&1 || sudo apt-get install -y "$p" 2>&1 | tail -n 1 >&2
 done
 if ! command -v google-chrome >/dev/null 2>&1; then
@@ -301,7 +419,7 @@ CUR="$(DISPLAY=:99 xdotool getdisplaygeometry 2>/dev/null | awk '{print $1"x"$2}
 [[ -z "$CUR" || "$CUR" == "x" ]] && CUR="none"
 if [[ "$CUR" != "${RES_W}x${RES_H}" ]]; then
     log "display is '$CUR', want ${RES_W}x${RES_H} — (re)starting Xvfb ..."
-    pkill -x Xvfb 2>/dev/null; sleep 2
+    kill_pat '^Xvfb :99( |$)'; sleep 2
     rm -f /tmp/.X11-unix/X99
     setsid Xvfb :99 -screen 0 ${RES_W}x${RES_H}x24 -ac </dev/null >"$RDIR/xvfb.log" 2>&1 &
     for i in $(seq 1 10); do ls /tmp/.X11-unix/X99 >/dev/null 2>&1 && break; sleep 1; done
@@ -312,49 +430,10 @@ ensure_pulse || die "no pulseaudio monitor source (restart did not help)"
 log "display :99 + audio monitor $MON ready"
 
 # ---- 3. launch chrome (bot profile), straight at the join page ----
-pkill -x chrome 2>/dev/null
-for i in $(seq 1 20); do
-    DISPLAY=:99 xdotool search --onlyvisible --class google-chrome 2>/dev/null | head -n1 | grep -q . || break
-    sleep 1
-done
-if DISPLAY=:99 xdotool search --onlyvisible --class google-chrome 2>/dev/null | head -n1 | grep -q .; then
-    log "chrome ignored SIGTERM, SIGKILLing ..."
-    pkill -9 -x chrome 2>/dev/null; sleep 3
-fi
+stop_chrome
+pgrep -u "$(id -u)" -f -- "$CHROME_PAT" >/dev/null && die "could not stop a previous chrome (it would hold the CDP port)"
 rm -rf "$RDIR/chrome-prof"; mkdir -p "$RDIR/chrome-prof"
-# toast-killer extension: hides nag/AI/accel toasts by TEXT (position-proof),
-# re-sweeping every 2s so re-rendered toasts die too. See zoom-record README.
-mkdir -p "$RDIR/toastext"
-cat > "$RDIR/toastext/manifest.json" <<'EXT_EOF'
-{"manifest_version":3,"name":"mlp-toastkiller","version":"1.0",
- "content_scripts":[{"matches":["https://app.zoom.us/*"],"js":["content.js"],
- "run_at":"document_idle","all_frames":true}]}
-EXT_EOF
-cat > "$RDIR/toastext/content.js" <<'EXT_EOF'
-const MLP_PHRASES = ["please enable access", "a new home for zoom ai",
-  "better meeting experience", "graphics/hardware acceleration"];
-function mlpSweep() {
-  try {
-    const els = document.querySelectorAll('body *');
-    for (const el of els) {
-      if (el.children.length) continue;
-      const t = (el.textContent || '').toLowerCase();
-      if (!t || !MLP_PHRASES.some(p => t.includes(p))) continue;
-      let n = el;
-      for (let i = 0; i < 4 && n && n !== document.body; i++) {
-        n = n.parentElement;
-        if (n && n.offsetWidth > 0 && n.offsetWidth < 1500) {
-          n.style.setProperty('display', 'none', 'important');
-          break;
-        }
-      }
-    }
-  } catch (e) {}
-}
-setInterval(mlpSweep, 2000);
-mlpSweep();
-EXT_EOF
-setsid bash -c 'DISPLAY=:99 google-chrome --no-sandbox --disable-dev-shm-usage --no-first-run --no-default-browser-check --use-angle=swiftshader --enable-unsafe-swiftshader --autoplay-policy=no-user-gesture-required --window-size=${RES_W},${RES_H} --window-position=0,0 --load-extension="$0/toastext" --user-data-dir="$0/chrome-prof" "https://app.zoom.us/wc/$1/join"' "$RDIR" "$ZID" </dev/null >"$RDIR/chrome.log" 2>&1 &
+setsid bash -c 'DISPLAY=:99 google-chrome --no-sandbox --disable-dev-shm-usage --no-first-run --no-default-browser-check --use-angle=swiftshader --enable-unsafe-swiftshader --autoplay-policy=no-user-gesture-required --remote-debugging-port=9222 --remote-allow-origins=* --window-size=${RES_W},${RES_H} --window-position=0,0 --user-data-dir="$0/chrome-prof" "https://app.zoom.us/wc/$1/join"' "$RDIR" "$ZID" </dev/null >"$RDIR/chrome.log" 2>&1 &
 trap on_exit EXIT
 CHROME_WIN=""
 for i in $(seq 1 30); do
@@ -444,8 +523,8 @@ done
 log "admitted (audio streams flowing)"
 sleep 3
 shot admitted
-# dismiss in-meeting toasts (best effort)
-dismiss_nag
+# dismiss in-meeting toasts: DOM first, coordinates only if CDP is down
+[[ "$(cdp_eval "$JS_TOASTS")" =~ ^[0-9]+$ ]] || dismiss_nag
 
 # ---- 6. record ----
 rm -f "$OUTMP4"
@@ -459,55 +538,60 @@ if ! start_ffmpeg; then
 fi
 log "ffmpeg pid $FFPID recording"
 
-if [[ "$TEST_SECS" -gt 0 ]]; then
-    log "test mode: recording ${TEST_SECS}s ..."
-    if [[ "$TEST_SECS" -gt 12 ]]; then
-        sleep 10
-        dismiss_nag
-        sleep $((TEST_SECS - 10))
+# TEST_SECS is only a shorter cap: tests exercise the SAME stop loop as real runs.
+CAP="$MAX_REC_SEC"
+[[ "$TEST_SECS" -gt 0 ]] && { CAP="$TEST_SECS"; log "test mode: cap ${TEST_SECS}s"; }
+sleep 5
+[[ "$(cdp_eval "$JS_TOASTS")" =~ ^[0-9]+$ ]] || dismiss_nag
+START=$(date +%s)
+MISS=0; QUIET=0; GONE=0; ALONE=0; SEEN=0; CDPFAIL=0; TICK=0; ABNORMAL=""; LASTN=""
+while true; do
+    sleep 5
+    ELAPSED=$(( $(date +%s) - START )); TICK=$((TICK + 5))
+    FF=1; kill -0 "$FFPID" 2>/dev/null || FF=0
+    if [[ -n "$(wintitle)" ]]; then MISS=0; else MISS=$((MISS + 1)); log "chrome window lost ($MISS/3)"; fi
+    if [[ "$(streams)" -ge 1 ]]; then QUIET=0; else QUIET=$((QUIET + 1)); fi
+    if P="$(meeting_probe)"; then
+        CDPFAIL=0; read -r PIN PN <<<"$P"
+        if [[ "$PIN" -eq 1 ]]; then
+            GONE=0
+            [[ "$PN" -ge 2 ]] && SEEN=1
+            if [[ "$PN" -eq 1 ]]; then ALONE=$((ALONE + 5)); else ALONE=0; fi
+        else
+            GONE=$((GONE + 1)); log "meeting UI absent ($GONE/$GONE_HITS)"
+        fi
+        [[ "$PN" != "$LASTN" ]] && { log "participants=$PN (in=$PIN)"; LASTN="$PN"; }
     else
-        sleep "$TEST_SECS"
+        CDPFAIL=$((CDPFAIL + 1)); ALONE=0
+        [[ "$CDPFAIL" -eq 3 ]] && log "CDP unavailable — falling back to OCR checks"
     fi
-    stop_ffmpeg
-    leave_meeting
-else
-    sleep 12
-    dismiss_nag
-    START=$(date +%s)
-    MISS=0; QUIET=0; OCR_TICK=0; ABNORMAL=""
-    while true; do
-        sleep 5
-        NOW=$(date +%s)
-        [[ $((NOW - START)) -ge "$MAX_REC_SEC" ]] && { log "max rec cap reached"; break; }
-        kill -0 "$FFPID" 2>/dev/null || { tail -n 5 "$RDIR/ffmpeg.log" >&2; ABNORMAL="ffmpeg exited unexpectedly"; break; }
-        # Window presence only: the title differs per meeting type (PMI shows
-        # "<name>'s Personal Meeting Room"; 2026-11-22 false "ended" every 20s).
-        # Meeting end is decided by OCR (ENDED) below.
-        TITLE="$(wintitle)"
-        if [[ -n "$TITLE" ]]; then MISS=0; else MISS=$((MISS + 1)); log "chrome window lost ($MISS/3)"; fi
-        [[ "$MISS" -ge 3 ]] && { log "meeting window gone -> ended"; break; }
-        N="$(streams)"
-        if [[ "$N" -ge 1 ]]; then QUIET=0; else QUIET=$((QUIET + 1)); fi
-        [[ "$QUIET" -ge 24 ]] && { ABNORMAL="no audio 120s (disconnected?)"; break; }
-        OCR_TICK=$((OCR_TICK + 5))
-        if [[ "$OCR_TICK" -ge 60 ]]; then
-            OCR_TICK=0
+    R="$(decide_stop "$ELAPSED" "$CAP" "$FF" "$MISS" "$QUIET" "$GONE" "$ALONE" "$SEEN")"
+    case "$R" in
+        CONTINUE) ;;
+        ENDED:*) log "stop: ${R#ENDED:}"; break ;;
+        ABNORMAL:*) ABNORMAL="${R#ABNORMAL:}"; [[ "$FF" -eq 0 ]] && tail -n 5 "$RDIR/ffmpeg.log" >&2; log "stop (abnormal): $ABNORMAL"; break ;;
+    esac
+    if [[ "$TICK" -ge 60 ]]; then
+        TICK=0
+        if [[ "$CDPFAIL" -lt 3 ]]; then
+            cdp_eval "$JS_TOASTS" >/dev/null
+        else
+            # OCR fallback (only while CDP is down)
             ST="$(page_state)"; log "ocr state=$ST"
             if [[ "$ST" == "ENDED" ]]; then
-                # confirm: a false stop loses the meeting, over-recording costs nothing
                 sleep 10; ST="$(page_state)"; log "ocr state (confirm)=$ST"
-                [[ "$ST" == "ENDED" ]] && { log "meeting ended (host)"; break; }
+                [[ "$ST" == "ENDED" ]] && { log "stop: meeting ended (ocr)"; break; }
             fi
             dismiss_nag
         fi
-    done
-    stop_ffmpeg
-    [[ -n "$(wintitle)" ]] && leave_meeting
-fi
+    fi
+done
+stop_ffmpeg
+[[ -n "$(wintitle)" ]] && leave_meeting
 shot end
 
 # ---- 7. verify + cleanup ----
-pkill -x chrome 2>/dev/null
+stop_chrome
 [[ -s "$OUTMP4" ]] || die "no output mp4 produced"
 # non-empty is not enough: a killed ffmpeg leaves an mp4 without moov atom
 DUR="$(ffprobe -v error -show_entries format=duration -of csv=p=0 "$OUTMP4" 2>/dev/null)"
@@ -523,7 +607,7 @@ echo "do_record: payload uploaded" >&2
 echo "do_record: launching remote recorder on $DEST (name=$REC_NAME, detached) ..." >&2
 # shellcheck disable=SC2029
 "${SSH[@]}" -o BatchMode=yes -o ConnectTimeout=15 "$DEST" \
-    "rm -f /tmp/mlprec/run.out; ZID_B64='$ZID_B64' ZPW_B64='$ZPW_B64' ZNAME_B64='$ZNAME_B64' TEST_SECS='$TEST_SECS' ADMIT_TIMEOUT_SEC='$ADMIT_TIMEOUT_SEC' MAX_REC_SEC='$MAX_REC_SEC' RES_W='$RES_W' RES_H='$RES_H' setsid bash /tmp/mlprec/run.sh </dev/null >>/tmp/mlprec/run.out 2>&1 & echo LAUNCHED" \
+    "rm -f /tmp/mlprec/run.out; ZID_B64='$ZID_B64' ZPW_B64='$ZPW_B64' ZNAME_B64='$ZNAME_B64' TEST_SECS='$TEST_SECS' ADMIT_TIMEOUT_SEC='$ADMIT_TIMEOUT_SEC' MAX_REC_SEC='$MAX_REC_SEC' ALONE_SEC='$ALONE_SEC' GONE_HITS='$GONE_HITS' RES_W='$RES_W' RES_H='$RES_H' setsid bash /tmp/mlprec/run.sh </dev/null >>/tmp/mlprec/run.out 2>&1 & echo LAUNCHED" \
     || { echo "do_record: remote launch failed" >&2; exit 1; }
 
 WAIT_BUDGET=$(( ADMIT_TIMEOUT_SEC + 300 ))
