@@ -146,12 +146,15 @@ dismiss_nag() {
     rm -f "$png"
     DISPLAY=:99 scrot "$png" 2>/dev/null || return 0
     # 1. mid-screen "Please enable access..." banner -> sweep its right end
-    t="$(ocr_crop 0 300 1920 300)"
+    # (2026-11-21: banner moved up to y~295 under Chrome 158; sweep both rows)
+    t="$(ocr_crop 0 180 1920 420)"
     if printf '%s' "$t" | grep -q "please enable access"; then
         log "sweeping nag X ..."
-        for x in 1250 1270 1290 1310 1330; do
-            DISPLAY=:99 xdotool mousemove $x 415 click 1 2>/dev/null
-            sleep 1
+        for y in 295 415; do
+            for x in 1250 1270 1290 1310 1330; do
+                DISPLAY=:99 xdotool mousemove $x $y click 1 2>/dev/null
+                sleep 1
+            done
         done
     fi
     # 2. AI "Got it" toast -> TSV word-center (proven 2x)
@@ -164,13 +167,25 @@ dismiss_nag() {
             break
         fi
     done
+    # 2b. TSV often misses "Got it"; gate on a cropped OCR of the toast and
+    # click the button at both known rows (toolbar shown: 318, hidden: 270)
+    t="$(ocr_crop 1420 140 500 240)"
+    if printf '%s' "$t" | grep -q -E "my notes|zoom ai|got it"; then
+        log "clicking AI toast Got it ..."
+        for y in 270 318; do
+            DISPLAY=:99 xdotool mousemove 1731 $y click 1 2>/dev/null
+            sleep 1
+        done
+    fi
     # 3. accel toast ("...graphics/hardware acceleration") -> sweep right end
     t="$(ocr_crop 900 150 1020 300)"
     if printf '%s' "$t" | grep -q "acceleration"; then
         log "sweeping accel X ..."
-        for x in 1280 1300 1320 1340; do
-            DISPLAY=:99 xdotool mousemove $x 355 click 1 2>/dev/null
-            sleep 1
+        for y in 226 355; do
+            for x in 1280 1300 1320 1340; do
+                DISPLAY=:99 xdotool mousemove $x $y click 1 2>/dev/null
+                sleep 1
+            done
         done
     fi
     DISPLAY=:99 xdotool mousemove 10 930 2>/dev/null
@@ -192,13 +207,46 @@ page_state() {
     txt="$(tesseract "$png" stdout 2>/dev/null | tr '[:upper:]' '[:lower:]')"
     printf '%s' "$txt" > "$RDIR/state.txt"
     if printf '%s' "$txt" | grep -q -E "let them know|waiting room|host will let you in"; then echo WAITING; return; fi
-    if printf '%s' "$txt" | grep -q -E "has ended|meeting ended|ended by host"; then echo ENDED; return; fi
+    if printf '%s' "$txt" | grep -q -E "has ended|has been ended|meeting ended|ended by host|host has ended|been removed|removed from the meeting|you left the meeting" \
+        && ! printf '%s' "$txt" | grep -q -i -E "participants"; then echo ENDED; return; fi
+    # (ENDED needs the toolbar to be GONE too: chat or a shared screen saying
+    # "has ended" must not stop a live recording.)
     if printf '%s' "$txt" | grep -q -E "link is invalid|invalid meeting|not found|does not exist|no longer available|meeting is over"; then echo INVALID; return; fi
     if printf '%s' "$txt" | grep -q -E "enter meeting info|meeting passcode|your name"; then echo PREJOIN; return; fi
     # INMEETING needs POSITIVE evidence (toolbar words). Empty/truncated OCR
     # must yield UNKNOWN, never INMEETING (false admit 2026-09-22).
     if printf '%s' "$txt" | grep -q -i -E "participants|leave meeting"; then echo INMEETING; return; fi
     echo UNKNOWN
+}
+
+ensure_pulse() {
+    # pulseaudio can hang or die mid-session (2026-11-22: monitor open failed
+    # with EAGAIN, then every restart hit "Daemon startup failed" on stale
+    # runtime state). Health = pactl answers AND a monitor source exists.
+    local i
+    for i in 1 2 3; do
+        if timeout 5 pactl info >/dev/null 2>&1; then
+            MON="$(timeout 5 pactl list short sources 2>/dev/null | awk '/monitor/ {print $2; exit}')"
+            [[ -n "$MON" ]] && return 0
+        fi
+        log "pulseaudio unhealthy (try $i) — restarting ..."
+        pulseaudio --kill 2>/dev/null; sleep 1
+        pkill -9 -x pulseaudio 2>/dev/null; sleep 1
+        rm -rf /tmp/pulse-* "${XDG_RUNTIME_DIR:-/nonexistent}/pulse" "$HOME/.config/pulse/"*-runtime 2>/dev/null
+        pulseaudio -D --exit-idle-time=-1 --disallow-exit 2>&1 | head -n 2 >&2
+        sleep 2
+    done
+    return 1
+}
+start_ffmpeg() {
+    DISPLAY=:99 ffmpeg -hide_banner -y -loglevel warning \
+        -video_size ${RES_W}x${CROP_H} -framerate 15 -f x11grab -i :99+0,${CROP_Y} \
+        -f pulse -ac 2 -i "$MON" \
+        -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p \
+        -c:a aac -b:a 128k -movflags +faststart "$OUTMP4" >"$RDIR/ffmpeg.log" 2>&1 &
+    FFPID=$!
+    sleep 2
+    kill -0 "$FFPID" 2>/dev/null
 }
 
 # ---- 1. provision (idempotent; safe on fresh default workers) ----
@@ -231,10 +279,7 @@ if [[ "$CUR" != "${RES_W}x${RES_H}" ]]; then
 fi
 ls /tmp/.X11-unix/X99 >/dev/null 2>&1 || die "Xvfb did not start"
 log "display: $(DISPLAY=:99 xdotool getdisplaygeometry 2>/dev/null)"
-pactl info >/dev/null 2>&1 || pulseaudio -D --exit-idle-time=-1 --disallow-exit 2>&1 | head -n 2 >&2
-sleep 1
-MON="$(pactl list short sources 2>/dev/null | awk '/monitor/ {print $2; exit}')"
-[[ -n "$MON" ]] || die "no pulseaudio monitor source (pactl list sources empty)"
+ensure_pulse || die "no pulseaudio monitor source (restart did not help)"
 log "display :99 + audio monitor $MON ready"
 
 # ---- 3. launch chrome (bot profile), straight at the join page ----
@@ -376,14 +421,12 @@ dismiss_nag
 rm -f "$OUTMP4"
 log "recording to $OUTMP4 ..."
 # crop to page area only (y=140): no browser tabs/omnibox/infobar in the mp4.
-DISPLAY=:99 ffmpeg -hide_banner -y -loglevel warning \
-    -video_size ${RES_W}x${CROP_H} -framerate 15 -f x11grab -i :99+0,${CROP_Y} \
-    -f pulse -ac 2 -i "$MON" \
-    -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p \
-    -c:a aac -b:a 128k -movflags +faststart "$OUTMP4" >"$RDIR/ffmpeg.log" 2>&1 &
-FFPID=$!
-sleep 2
-kill -0 "$FFPID" 2>/dev/null || { tail -n 5 "$RDIR/ffmpeg.log" >&2; die "ffmpeg died at startup"; }
+if ! start_ffmpeg; then
+    tail -n 5 "$RDIR/ffmpeg.log" >&2
+    log "ffmpeg died at startup — repairing pulseaudio and retrying once ..."
+    ensure_pulse || die "pulseaudio unrecoverable"
+    start_ffmpeg || { tail -n 5 "$RDIR/ffmpeg.log" >&2; die "ffmpeg died at startup (after pulse repair)"; }
+fi
 log "ffmpeg pid $FFPID recording"
 
 leave_meeting() {
@@ -419,11 +462,12 @@ else
         sleep 5
         NOW=$(date +%s)
         [[ $((NOW - START)) -ge "$MAX_REC_SEC" ]] && { log "max rec cap reached"; break; }
+        kill -0 "$FFPID" 2>/dev/null || { tail -n 5 "$RDIR/ffmpeg.log" >&2; log "ffmpeg exited unexpectedly -> stop"; break; }
+        # Window presence only: the title differs per meeting type (PMI shows
+        # "<name>'s Personal Meeting Room"; 2026-11-22 false "ended" every 20s).
+        # Meeting end is decided by OCR (ENDED) below.
         TITLE="$(wintitle)"
-        case "$TITLE" in
-            *"Zoom Meeting - Google Chrome"*) MISS=0 ;;
-            *) MISS=$((MISS + 1)); log "title lost ($MISS/3): $TITLE" ;;
-        esac
+        if [[ -n "$TITLE" ]]; then MISS=0; else MISS=$((MISS + 1)); log "chrome window lost ($MISS/3)"; fi
         [[ "$MISS" -ge 3 ]] && { log "meeting window gone -> ended"; break; }
         N="$(streams)"
         if [[ "$N" -ge 1 ]]; then QUIET=0; else QUIET=$((QUIET + 1)); fi
@@ -432,14 +476,16 @@ else
         if [[ "$OCR_TICK" -ge 60 ]]; then
             OCR_TICK=0
             ST="$(page_state)"; log "ocr state=$ST"
-            [[ "$ST" == "ENDED" ]] && { log "meeting ended (host)"; break; }
+            if [[ "$ST" == "ENDED" ]]; then
+                # confirm: a false stop loses the meeting, over-recording costs nothing
+                sleep 10; ST="$(page_state)"; log "ocr state (confirm)=$ST"
+                [[ "$ST" == "ENDED" ]] && { log "meeting ended (host)"; break; }
+            fi
             dismiss_nag
         fi
     done
     stop_ffmpeg
-    case "$(wintitle)" in
-        *"Zoom Meeting - Google Chrome"*) leave_meeting ;;
-    esac
+    [[ -n "$(wintitle)" ]] && leave_meeting
 fi
 shot end
 
