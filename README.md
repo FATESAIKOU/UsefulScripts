@@ -5,6 +5,7 @@
 | 工具 | 說明 |
 |---|---|
 | `zoom-record/` | headless Zoom 錄影：Mac 下一條指令，在遠端 Linux worker 上自動入會＋錄影＋散會自動停，mp4 取回本機 |
+| `yt-transcript/` | YouTube 轉逐字稿：一條指令，有人工字幕直接用，沒有就下載音訊跑 Whisper（Mac 用 Apple GPU、Linux 用 NVIDIA GPU，可 `--remote` 丟到別台），中文自動轉繁體 |
 
 ## 慣例
 
